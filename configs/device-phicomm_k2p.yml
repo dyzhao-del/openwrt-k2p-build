@@ -15,3 +15,26 @@ device:
   notes: |
     固件大小必须小于16MB
     建议使用squashfs文件系统
+
+build_stages:
+  stage1:
+    name: "Minimal System"
+    description: "Basic router functionality only"
+    config_file: "k2p-minimal.config"
+    
+  stage2:
+    name: "Extended Features"
+    description: "Web interface + common tools"
+    config_file: "k2p-stage2-extended.config"
+    features:
+      - "Luci Web Interface"
+      - "System monitoring tools"
+      - "Network diagnostics"
+      - "File transfer services"
+      - "QoS and bandwidth monitoring"
+    
+  stage3:
+    name: "Advanced Features"
+    description: "VPN + NAS + Adblock"
+    config_file: "k2p-stage3-advanced.config"
+    planned: true
