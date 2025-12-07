@@ -4,152 +4,93 @@ on:
   workflow_dispatch:
     inputs:
       build_stage:
-        description: 'Build Stage (1=Minimal, 2=Extended, 3=Advanced)'
+        description: 'Build Stage (1, 2, or 3)'
         required: true
         default: '2'
         type: choice
         options:
-          - '1'
-          - '2'
-          - '3'
-      clean_build:
-        description: 'Clean build (ignore cache)'
-        required: false
-        default: false
-        type: boolean
+        - '1'
+        - '2'
+        - '3'
   
   push:
-    branches: [main, master]
+    branches: [main]
     paths:
-      - 'configs/**'
-      - 'scripts/**'
-      - '.github/workflows/**'
-
-  schedule:
-    - cron: '0 0 * * 0'
+    - 'configs/**'
+    - '.github/workflows/**'
 
 env:
   OPENWRT_VERSION: "v23.05.3"
-  DEVICE_NAME: "phicomm_k2p"
-  DEFAULT_BUILD_STAGE: "2"
 
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 240
+    timeout-minutes: 180
     
     steps:
-    - name: Checkout Repository
+    - name: Checkout repository
       uses: actions/checkout@v4
-      with:
-        submodules: false
-        
-    - name: Setup Build Environment
+    
+    - name: Setup environment
       run: |
         sudo apt-get update
-        sudo apt-get install -y \
-          build-essential ccache ecj fastjar file g++ gawk gettext git \
-          java-propose-classpath libelf-dev libncurses5-dev libncursesw5-dev \
+        sudo apt-get install -y build-essential ccache ecj fastjar file g++ gawk \
+          gettext git java-propose-classpath libelf-dev libncurses5-dev libncursesw5-dev \
           libssl-dev python3 python3-distutils python3-setuptools python3-pip \
-          rsync subversion swig time unzip wget xsltproc zlib1g-dev \
-          python3-pyelftools cmake python3-dev p7zip-full jq lzma cpio
+          rsync subversion swig time unzip wget xsltproc zlib1g-dev
         
-    - name: Clone OpenWRT Source
+    - name: Clone OpenWRT
       run: |
         cd $GITHUB_WORKSPACE
         git clone https://github.com/openwrt/openwrt.git -b ${{ env.OPENWRT_VERSION }} --depth=1
-        cd openwrt
         
-    - name: Setup Build Cache
-      if: ${{ !github.event.inputs.clean_build }}
+    - name: Cache packages
       uses: actions/cache@v4
       with:
-        path: |
-          ${{ github.workspace }}/openwrt/dl
-          /tmp/ccache
-        key: ${{ runner.os }}-openwrt-${{ env.OPENWRT_VERSION }}-${{ env.DEFAULT_BUILD_STAGE }}-${{ hashFiles('configs/device-phicomm_k2p.yml') }}
-        restore-keys: |
-          ${{ runner.os }}-openwrt-${{ env.OPENWRT_VERSION }}-${{ env.DEFAULT_BUILD_STAGE }}-
-          ${{ runner.os }}-openwrt-${{ env.OPENWRT_VERSION }}-
-          
-    - name: Setup ccache
-      run: |
-        ccache -o max_size=15G
-        ccache -s
+        path: ${{ github.workspace }}/openwrt/dl
+        key: ${{ runner.os }}-openwrt-dl-${{ env.OPENWRT_VERSION }}
         
-    - name: Update Feeds
+    - name: Update feeds
       run: |
         cd $GITHUB_WORKSPACE/openwrt
         ./scripts/feeds update -a
         ./scripts/feeds install -a
         
-    - name: Apply Configuration Based on Stage
-      id: config-stage
+    - name: Apply configuration
       run: |
         cd $GITHUB_WORKSPACE/openwrt
         
-        # 确定构建阶段
-        if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-          BUILD_STAGE="${{ github.event.inputs.build_stage }}"
+        if [ "${{ github.event.inputs.build_stage }}" = "1" ]; then
+          CONFIG_FILE="k2p-minimal.config"
+        elif [ "${{ github.event.inputs.build_stage }}" = "2" ]; then
+          CONFIG_FILE="k2p-stage2-extended.config"
+        elif [ "${{ github.event.inputs.build_stage }}" = "3" ]; then
+          CONFIG_FILE="k2p-stage3-advanced.config"
         else
-          BUILD_STAGE="${{ env.DEFAULT_BUILD_STAGE }}"
+          CONFIG_FILE="k2p-stage2-extended.config"
         fi
-        
-        echo "Build stage: $BUILD_STAGE"
-        echo "BUILD_STAGE=$BUILD_STAGE" >> $GITHUB_OUTPUT
-        
-        CONFIG_FILE=""
-        case "$BUILD_STAGE" in
-          "1")
-            CONFIG_FILE="k2p-minimal.config"
-            ;;
-          "2")
-            CONFIG_FILE="k2p-stage2-extended.config"
-            ;;
-          "3")
-            CONFIG_FILE="k2p-stage3-advanced.config"
-            ;;
-          *)
-            echo "Unknown build stage: $BUILD_STAGE"
-            exit 1
-            ;;
-        esac
         
         echo "Using config file: $CONFIG_FILE"
         
-        if [ ! -f "$GITHUB_WORKSPACE/configs/$CONFIG_FILE" ]; then
-          echo "Config file not found: $CONFIG_FILE"
+        if [ -f "$GITHUB_WORKSPACE/configs/$CONFIG_FILE" ]; then
+          cp "$GITHUB_WORKSPACE/configs/$CONFIG_FILE" .config
+          make defconfig
+        else
+          echo "Error: Config file not found"
           exit 1
         fi
         
-        cp "$GITHUB_WORKSPACE/configs/$CONFIG_FILE" .config
-        make defconfig
-        
-    - name: Download Packages
+    - name: Download packages
       run: |
         cd $GITHUB_WORKSPACE/openwrt
         make download -j$(nproc) || make download -j1
         
-    - name: Build Firmware
+    - name: Build firmware
       run: |
         cd $GITHUB_WORKSPACE/openwrt
-        
-        cat > build-info.txt << BUILDINFO
-Build Information
-=================
-Stage: ${{ steps.config-stage.outputs.BUILD_STAGE }}
-OpenWRT Version: ${{ env.OPENWRT_VERSION }}
-Device: ${{ env.DEVICE_NAME }}
-GitHub Run ID: ${{ github.run_id }}
-Commit SHA: ${{ github.sha }}
-Build Date: $(date)
-Trigger: ${{ github.event_name }}
-BUILDINFO
-        
         make -j$(($(nproc) + 1)) V=s 2>&1 | tee build.log
         
-    - name: Check Build Result
-      if: success()
+    - name: Check firmware
       run: |
         cd $GITHUB_WORKSPACE/openwrt
         
@@ -157,51 +98,20 @@ BUILDINFO
         
         if [ -f "$FIRMWARE" ]; then
           echo "Firmware built successfully!"
-          
-          FIRMWARE_SIZE=$(stat -c%s "$FIRMWARE")
-          MAX_SIZE=$((16 * 1024 * 1024))
-          
-          echo "Firmware size: $((FIRMWARE_SIZE / 1024 / 1024))MB"
-          echo "Max size: $((MAX_SIZE / 1024 / 1024))MB"
-          
-          if [ $FIRMWARE_SIZE -gt $MAX_SIZE ]; then
-            echo "ERROR: Firmware too large!"
-            exit 1
-          fi
-          
-          cd bin/targets/ramips/mt7621
-          sha256sum * > sha256sums.txt
-          md5sum * > md5sums.txt
+          ls -lh bin/targets/ramips/mt7621/
         else
-          echo "ERROR: Firmware file not found!"
+          echo "Firmware not found!"
           exit 1
         fi
         
-    - name: Upload Artifacts
-      if: success()
+    - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: openwrt-k2p-build-${{ github.run_number }}
-        path: |
-          ${{ github.workspace }}/openwrt/bin/targets/ramips/mt7621/*
-          ${{ github.workspace }}/openwrt/.config
-          ${{ github.workspace }}/openwrt/build-info.txt
-        retention-days: 30
+        name: firmware
+        path: ${{ github.workspace }}/openwrt/bin/targets/ramips/mt7621/*
         
-    - name: Upload Build Log
-      if: always()
+    - name: Upload logs
       uses: actions/upload-artifact@v4
       with:
-        name: build-logs-${{ github.run_number }}
-        path: |
-          ${{ github.workspace }}/openwrt/build.log
-        retention-days: 7
-        
-    - name: Save Cache
-      if: success() && !github.event.inputs.clean_build
-      uses: actions/cache@v4
-      with:
-        path: |
-          ${{ github.workspace }}/openwrt/dl
-          /tmp/ccache
-        key: ${{ runner.os }}-openwrt-${{ env.OPENWRT_VERSION }}-${{ steps.config-stage.outputs.BUILD_STAGE }}-${{ github.run_id }}
+        name: logs
+        path: ${{ github.workspace }}/openwrt/build.log
