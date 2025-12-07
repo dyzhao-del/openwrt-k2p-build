@@ -25,20 +25,18 @@ on:
       - 'scripts/**'
       - '.github/workflows/**'
 
-  # 定时构建（默认使用阶段2）
   schedule:
-    - cron: '0 0 * * 0'  # 每周日午夜
+    - cron: '0 0 * * 0'
 
 env:
   OPENWRT_VERSION: "v23.05.3"
   DEVICE_NAME: "phicomm_k2p"
-  # 默认构建阶段（用于非手动触发）
   DEFAULT_BUILD_STAGE: "2"
 
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 240  # 4小时，阶段2需要更多时间
+    timeout-minutes: 240
     
     steps:
     - name: Checkout Repository
@@ -86,126 +84,60 @@ jobs:
         ./scripts/feeds install -a
         
     - name: Apply Configuration Based on Stage
+      id: config-stage
       run: |
         cd $GITHUB_WORKSPACE/openwrt
         
         # 确定构建阶段
         if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-          # 手动触发时使用输入参数
           BUILD_STAGE="${{ github.event.inputs.build_stage }}"
         else
-          # 自动触发时使用默认阶段
           BUILD_STAGE="${{ env.DEFAULT_BUILD_STAGE }}"
         fi
         
-        echo "🔧 Build stage determined: $BUILD_STAGE"
-        echo "🔧 Triggered by: ${{ github.event_name }}"
+        echo "Build stage: $BUILD_STAGE"
+        echo "BUILD_STAGE=$BUILD_STAGE" >> $GITHUB_OUTPUT
         
-        # 根据选择的阶段应用配置
         CONFIG_FILE=""
-        
         case "$BUILD_STAGE" in
           "1")
             CONFIG_FILE="k2p-minimal.config"
-            echo "🔧 Applying Stage 1 (Minimal) configuration"
             ;;
           "2")
             CONFIG_FILE="k2p-stage2-extended.config"
-            echo "🔧 Applying Stage 2 (Extended) configuration"
             ;;
           "3")
             CONFIG_FILE="k2p-stage3-advanced.config"
-            echo "🔧 Applying Stage 3 (Advanced) configuration"
             ;;
           *)
-            echo "❌ Unknown build stage: $BUILD_STAGE"
-            echo "Available stages: 1, 2, 3"
-            echo "Using default stage: ${{ env.DEFAULT_BUILD_STAGE }}"
-            
-            # 使用默认阶段作为后备
-            if [ "${{ env.DEFAULT_BUILD_STAGE }}" == "1" ]; then
-              CONFIG_FILE="k2p-minimal.config"
-            elif [ "${{ env.DEFAULT_BUILD_STAGE }}" == "2" ]; then
-              CONFIG_FILE="k2p-stage2-extended.config"
-            else
-              CONFIG_FILE="k2p-stage3-advanced.config"
-            fi
-            echo "🔧 Using default configuration: $CONFIG_FILE"
+            echo "Unknown build stage: $BUILD_STAGE"
+            exit 1
             ;;
         esac
         
-        # 检查配置文件是否存在
+        echo "Using config file: $CONFIG_FILE"
+        
         if [ ! -f "$GITHUB_WORKSPACE/configs/$CONFIG_FILE" ]; then
-          echo "❌ Configuration file not found: $CONFIG_FILE"
-          echo "Available config files:"
-          ls -la "$GITHUB_WORKSPACE/configs/"
+          echo "Config file not found: $CONFIG_FILE"
           exit 1
         fi
         
-        # 复制配置文件
-        echo "📋 Copying configuration file: $CONFIG_FILE"
         cp "$GITHUB_WORKSPACE/configs/$CONFIG_FILE" .config
-        
-        # 检查.config文件是否创建成功
-        if [ ! -f ".config" ]; then
-          echo "❌ Failed to create .config file"
-          exit 1
-        fi
-        
-        echo "📄 .config file created successfully"
-        echo "First 10 lines of .config:"
-        head -10 .config
-        
-        # 生成完整配置
-        echo "🔄 Running defconfig..."
         make defconfig
-        
-        # 显示配置摘要
-        echo "📊 Configuration summary:"
-        echo "=========================="
-        TOTAL_PACKAGES=$(grep "^CONFIG_PACKAGE" .config | grep "=y$" | wc -l)
-        echo "Total packages enabled: $TOTAL_PACKAGES"
-        
-        # 显示启用的包分类
-        echo ""
-        echo "📦 Enabled packages by category:"
-        echo "-------------------------------"
-        grep "^CONFIG_PACKAGE.*=y$" .config | \
-          sed 's/CONFIG_PACKAGE_//;s/=y$//' | \
-          sort | \
-          awk '
-            /luci/ {luci++}
-            /kmod/ {kmod++}
-            /^[a-z]/ && !/luci/ && !/kmod/ {other++}
-            END {
-              printf "Web界面 (luci-*): %d\n", luci
-              printf "内核模块 (kmod-*): %d\n", kmod
-              printf "其他工具: %d\n", other
-            }
-          '
         
     - name: Download Packages
       run: |
         cd $GITHUB_WORKSPACE/openwrt
-        echo "📦 Downloading packages..."
         make download -j$(nproc) || make download -j1
-        
-        # 检查下载是否成功
-        if [ $? -eq 0 ]; then
-          echo "✅ Package download completed"
-        else
-          echo "⚠️ Package download had issues, but continuing..."
-        fi
         
     - name: Build Firmware
       run: |
         cd $GITHUB_WORKSPACE/openwrt
         
-        # 创建构建信息文件
         cat > build-info.txt << BUILDINFO
 Build Information
 =================
-Stage: $BUILD_STAGE
+Stage: ${{ steps.config-stage.outputs.BUILD_STAGE }}
 OpenWRT Version: ${{ env.OPENWRT_VERSION }}
 Device: ${{ env.DEVICE_NAME }}
 GitHub Run ID: ${{ github.run_id }}
@@ -214,111 +146,42 @@ Build Date: $(date)
 Trigger: ${{ github.event_name }}
 BUILDINFO
         
-        echo "🔨 Building firmware..."
-        echo "Build stage: $BUILD_STAGE"
-        
-        # 开始编译，保存详细日志
-        BUILD_START=$(date +%s)
-        
-        # 使用tee同时输出到控制台和文件
-        # 设置管道错误处理
-        set -o pipefail
         make -j$(($(nproc) + 1)) V=s 2>&1 | tee build.log
-        BUILD_EXIT_CODE=$?
-        set +o pipefail
-        
-        BUILD_END=$(date +%s)
-        BUILD_DURATION=$((BUILD_END - BUILD_START))
-        
-        echo "Build duration: $((BUILD_DURATION / 60))m $((BUILD_DURATION % 60))s" >> build-info.txt
-        
-        if [ $BUILD_EXIT_CODE -eq 0 ]; then
-          echo "✅ Build completed successfully!"
-          echo "BUILD_STATUS=success" >> $GITHUB_ENV
-        else
-          echo "❌ Build failed with exit code: $BUILD_EXIT_CODE"
-          echo "BUILD_STATUS=failed" >> $GITHUB_ENV
-          
-          # 检查常见错误
-          echo "🔍 Checking for common errors..."
-          if grep -q "package size exceeds" build.log; then
-            echo "❌ Firmware too large! Need to reduce package size."
-          fi
-          if grep -q "download failed" build.log; then
-            echo "❌ Package download failed! Network issue."
-          fi
-          if grep -q "dependency error" build.log; then
-            echo "❌ Package dependency error!"
-          fi
-        fi
         
     - name: Check Build Result
-      if: ${{ env.BUILD_STATUS == 'success' }}
+      if: success()
       run: |
         cd $GITHUB_WORKSPACE/openwrt
         
-        # 检查固件文件
         FIRMWARE="bin/targets/ramips/mt7621/openwrt-ramips-mt7621-phicomm_k2p-squashfs-sysupgrade.bin"
         
         if [ -f "$FIRMWARE" ]; then
-          echo "✅ Firmware built successfully!"
+          echo "Firmware built successfully!"
           
-          # 显示文件信息
-          echo "📁 Output directory contents:"
-          ls -lh bin/targets/ramips/mt7621/
-          
-          # 检查固件大小
           FIRMWARE_SIZE=$(stat -c%s "$FIRMWARE")
-          MAX_SIZE=$((16 * 1024 * 1024))  # 16MB
+          MAX_SIZE=$((16 * 1024 * 1024))
           
-          echo ""
-          echo "📊 Firmware size check:"
-          echo "  Current size: $((FIRMWARE_SIZE / 1024 / 1024))MB"
-          echo "  Maximum size: $((MAX_SIZE / 1024 / 1024))MB"
-          echo "  Available: $(( (MAX_SIZE - FIRMWARE_SIZE) / 1024 ))KB"
+          echo "Firmware size: $((FIRMWARE_SIZE / 1024 / 1024))MB"
+          echo "Max size: $((MAX_SIZE / 1024 / 1024))MB"
           
           if [ $FIRMWARE_SIZE -gt $MAX_SIZE ]; then
-            echo "❌ ERROR: Firmware too large! Exceeds 16MB limit."
-            echo "Please remove some packages and try again."
-            
-            # 显示最大的包
-            echo ""
-            echo "📦 Largest packages (consider removing):"
-            find bin/targets/ramips/mt7621 -name "*.ipk" -exec du -h {} \; | sort -hr | head -10
-            
+            echo "ERROR: Firmware too large!"
             exit 1
-          else
-            echo "✅ Firmware size is within limits."
           fi
           
-          # 生成校验文件
           cd bin/targets/ramips/mt7621
           sha256sum * > sha256sums.txt
           md5sum * > md5sums.txt
-          
-          # 显示构建信息
-          echo ""
-          echo "📋 Build information:"
-          cat $GITHUB_WORKSPACE/openwrt/build-info.txt
-          
         else
-          echo "❌ ERROR: Firmware file not found!"
-          echo "Available files in output directory:"
-          find bin/targets/ -type f 2>/dev/null | head -20 || echo "No output directory found"
-          
-          # 检查编译日志中的错误
-          echo ""
-          echo "🔍 Last 20 lines of build log:"
-          tail -20 $GITHUB_WORKSPACE/openwrt/build.log
-          
+          echo "ERROR: Firmware file not found!"
           exit 1
         fi
         
     - name: Upload Artifacts
-      if: ${{ env.BUILD_STATUS == 'success' }}
+      if: success()
       uses: actions/upload-artifact@v4
       with:
-        name: openwrt-k2p-stage${{ env.DEFAULT_BUILD_STAGE }}-${{ github.run_number }}
+        name: openwrt-k2p-build-${{ github.run_number }}
         path: |
           ${{ github.workspace }}/openwrt/bin/targets/ramips/mt7621/*
           ${{ github.workspace }}/openwrt/.config
@@ -332,57 +195,13 @@ BUILDINFO
         name: build-logs-${{ github.run_number }}
         path: |
           ${{ github.workspace }}/openwrt/build.log
-          ${{ github.workspace }}/openwrt/logs/
         retention-days: 7
         
     - name: Save Cache
-      if: ${{ env.BUILD_STATUS == 'success' && !github.event.inputs.clean_build }}
+      if: success() && !github.event.inputs.clean_build
       uses: actions/cache@v4
       with:
         path: |
           ${{ github.workspace }}/openwrt/dl
           /tmp/ccache
-        key: ${{ runner.os }}-openwrt-${{ env.OPENWRT_VERSION }}-${{ env.DEFAULT_BUILD_STAGE }}-${{ hashFiles('configs/device-phicomm_k2p.yml') }}-${{ github.run_id }}
-        
-    - name: Create GitHub Release (Optional)
-      if: ${{ env.BUILD_STATUS == 'success' && github.event_name == 'workflow_dispatch' }}
-      uses: softprops/action-gh-release@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        tag_name: stage${{ github.event.inputs.build_stage || env.DEFAULT_BUILD_STAGE }}-${{ github.run_number }}
-        name: "OpenWRT K2P Stage ${{ github.event.inputs.build_stage || env.DEFAULT_BUILD_STAGE }} Build #${{ github.run_number }}"
-        body: |
-          # OpenWRT固件 for Phicomm K2P
-          
-          **构建信息:**
-          - 阶段: ${{ github.event.inputs.build_stage || env.DEFAULT_BUILD_STAGE }}
-          - OpenWRT版本: ${{ env.OPENWRT_VERSION }}
-          - 构建日期: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
-          - GitHub运行ID: ${{ github.run_id }}
-          - 提交: ${{ github.sha }}
-          
-          **功能特性:**
-          ${{ github.event.inputs.build_stage == '1' || env.DEFAULT_BUILD_STAGE == '1' && '- 最小系统（仅基础路由功能）' || '' }}
-          ${{ github.event.inputs.build_stage == '2' || env.DEFAULT_BUILD_STAGE == '2' && '- Web管理界面（Luci）\n- 常用系统工具\n- 网络诊断工具\n- QoS和流量控制\n- 带宽监控' || '' }}
-          ${{ github.event.inputs.build_stage == '3' || env.DEFAULT_BUILD_STAGE == '3' && '- VPN支持\n- NAS功能\n- 广告过滤\n- 高级网络功能' || '' }}
-          
-          **安装说明:**
-          1. 下载对应的.bin文件
-          2. 登录路由器管理界面
-          3. 选择固件升级
-          4. 上传并刷入固件
-          5. 等待自动重启
-          
-          **默认登录:**
-          - 地址: 192.168.1.1
-          - 用户名: root
-          - 密码: (首次登录时设置)
-          
-          **注意事项:**
-          - 刷机前请备份原厂固件
-          - 确保固件大小不超过16MB
-          - 如有问题请查看日志文件
-        draft: false
-        prerelease: false
-        files: ${{ github.workspace }}/openwrt/bin/targets/ramips/mt7621/*
+        key: ${{ runner.os }}-openwrt-${{ env.OPENWRT_VERSION }}-${{ steps.config-stage.outputs.BUILD_STAGE }}-${{ github.run_id }}
