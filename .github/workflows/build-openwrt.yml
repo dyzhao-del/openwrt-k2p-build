@@ -1,0 +1,125 @@
+name: Build OpenWRT for Phicomm K2P
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_stage:
+        description: 'Build Stage'
+        required: true
+        default: '1'
+        type: choice
+        options:
+          - '1'
+          - '2'
+          - '3'
+      clean_build:
+        description: 'Clean Build (remove cache)'
+        required: false
+        default: false
+        type: boolean
+  
+  push:
+    branches: [main, master]
+    paths:
+      - 'configs/**'
+      - 'scripts/**'
+      - '.github/workflows/**'
+      - 'patches/**'
+
+env:
+  OPENWRT_VERSION: "v23.05.3"
+  DEVICE_NAME: "phicomm_k2p"
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+      with:
+        submodules: false
+        
+    - name: Setup Build Environment
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential ccache ecj fastjar file g++ gawk gettext git \
+          java-propose-classpath libelf-dev libncurses5-dev libncursesw5-dev \
+          libssl-dev python3 python3-distutils python3-setuptools python3-pip \
+          rsync subversion swig time unzip wget xsltproc zlib1g-dev \
+          python3-pyelftools cmake python3-dev p7zip-full jq lzma cpio
+        
+    - name: Clone OpenWRT Source
+      run: |
+        cd $GITHUB_WORKSPACE
+        git clone https://github.com/openwrt/openwrt.git -b ${{ env.OPENWRT_VERSION }} --depth=1
+        cd openwrt
+        
+    - name: Restore Cache
+      uses: actions/cache@v4
+      with:
+        path: |
+          ${{ github.workspace }}/openwrt/dl
+          /tmp/ccache
+        key: ${{ runner.os }}-openwrt-${{ env.OPENWRT_VERSION }}-${{ hashFiles('configs/device-phicomm_k2p.yml') }}
+        restore-keys: |
+          ${{ runner.os }}-openwrt-${{ env.OPENWRT_VERSION }}-
+          
+    - name: Setup ccache
+      run: |
+        ccache -o max_size=15G
+        ccache -s
+        
+    - name: Update Feeds
+      run: |
+        cd $GITHUB_WORKSPACE/openwrt
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+        
+    - name: Apply Configuration
+      run: |
+        cd $GITHUB_WORKSPACE/openwrt
+        cp $GITHUB_WORKSPACE/configs/k2p-minimal.config .config
+        make defconfig
+        
+    - name: Download Packages
+      run: |
+        cd $GITHUB_WORKSPACE/openwrt
+        make download -j$(nproc) || make download -j1
+        
+    - name: Build Firmware
+      run: |
+        cd $GITHUB_WORKSPACE/openwrt
+        echo "Building OpenWRT for ${{ env.DEVICE_NAME }}..."
+        make -j$(($(nproc) + 1)) V=s 2>&1 | tee build.log
+        
+    - name: Check Build Result
+      run: |
+        cd $GITHUB_WORKSPACE/openwrt
+        FIRMWARE="bin/targets/ramips/mt7621/openwrt-ramips-mt7621-phicomm_k2p-squashfs-sysupgrade.bin"
+        if [ -f "$FIRMWARE" ]; then
+          echo "✅ Firmware built successfully!"
+          ls -lh bin/targets/ramips/mt7621/
+        else
+          echo "❌ Firmware build failed!"
+          exit 1
+        fi
+        
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: openwrt-k2p-firmware
+        path: |
+          ${{ github.workspace }}/openwrt/bin/targets/ramips/mt7621/*
+          ${{ github.workspace }}/openwrt/.config
+        retention-days: 7
+        
+    - name: Save Cache
+      uses: actions/cache@v4
+      with:
+        path: |
+          ${{ github.workspace }}/openwrt/dl
+          /tmp/ccache
+        key: ${{ runner.os }}-openwrt-${{ env.OPENWRT_VERSION }}-${{ hashFiles('configs/device-phicomm_k2p.yml') }}-${{ github.run_id }}

@@ -1,0 +1,17 @@
+device:
+  name: "Phicomm K2P"
+  model: "phicomm_k2p"
+  
+  hardware:
+    cpu: "MT7621AT 880MHz"
+    ram: "128MB DDR3"
+    flash: "16MB"
+    
+  build:
+    target: "ramips"
+    subtarget: "mt7621"
+    profile: "phicomm_k2p"
+    
+  notes: |
+    固件大小必须小于16MB
+    建议使用squashfs文件系统

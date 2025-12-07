@@ -1,0 +1,38 @@
+# 编译输出
+/bin/
+/tmp/
+/dl/
+/build/
+/ccache/
+
+# OpenWRT源码
+/openwrt/
+
+# 系统文件
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# 日志文件
+*.log
+logs/
+
+# 临时文件
+*.tmp
+*.temp
+
+# 环境变量
+.env
+.env.local
+
+# IDE文件
+.vscode/
+.idea/
+*.code-workspace
+
+# 其他
+.ssh/
+*.pem
+*.key
