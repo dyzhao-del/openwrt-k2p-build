@@ -1,0 +1,59 @@
+name: Build with Mirror Source
+
+on:
+  workflow_dispatch:
+    inputs:
+      openwrt_version:
+        description: 'OpenWRT version'
+        required: true
+        default: 'v24.10.4'
+        type: string
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential libncurses5-dev git
+    
+    - name: Clone with mirror
+      run: |
+        cd $GITHUB_WORKSPACE
+        VERSION="${{ github.event.inputs.openwrt_version }}"
+        
+        # 使用GitHub镜像
+        git clone https://github.com/openwrt/openwrt.git -b $VERSION
+        
+        cd openwrt
+        # 修改为国内镜像源
+        echo "src-git packages https://github.com/openwrt/packages.git" > feeds.conf.default
+        echo "src-git luci https://github.com/openwrt/luci.git" >> feeds.conf.default
+        echo "# 注释掉可能出问题的feed" >> feeds.conf.default
+        echo "# src-git routing https://github.com/openwrt/routing.git" >> feeds.conf.default
+        echo "# src-git telephony https://github.com/openwrt/telephony.git" >> feeds.conf.default
+    
+    - name: Configure minimal
+      run: |
+        cd $GITHUB_WORKSPACE/openwrt
+        echo "CONFIG_TARGET_ramips=y" > .config
+        echo "CONFIG_TARGET_ramips_mt7621=y" >> .config
+        echo "CONFIG_TARGET_ramips_mt7621_DEVICE_phicomm_k2p=y" >> .config
+        echo "CONFIG_TARGET_ROOTFS_SQUASHFS=y" >> .config
+        echo "CONFIG_TARGET_ROOTFS_PARTSIZE=12" >> .config
+        echo "CONFIG_PACKAGE_kmod-mt7615e=y" >> .config
+        echo "CONFIG_PACKAGE_dnsmasq-full=y" >> .config
+        make defconfig
+    
+    - name: Build
+      run: |
+        cd $GITHUB_WORKSPACE/openwrt
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+        make download -j2
+        make -j2

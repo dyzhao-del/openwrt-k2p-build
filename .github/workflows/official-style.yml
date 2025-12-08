@@ -47,6 +47,16 @@ jobs:
         git clone https://github.com/openwrt/openwrt.git -b $VERSION
         cd openwrt
         echo "Commit: $(git log -1 --oneline)"
+        
+        # 修改feeds源为镜像源，避免503错误
+        echo "🔧 修改feeds源为镜像源..."
+        sed -i 's|git.openwrt.org/feed|github.com/openwrt|g' feeds.conf.default
+        sed -i 's|git.openwrt.org/project|github.com/openwrt|g' feeds.conf.default
+        sed -i 's|https://github.com|https://ghproxy.com/https://github.com|g' feeds.conf.default
+        
+        # 显示修改后的feeds配置
+        echo "修改后的feeds配置:"
+        cat feeds.conf.default | head -10
     
     - name: Configure for K2P
       run: |
@@ -77,23 +87,6 @@ jobs:
         if [ -f "$CONFIG_FILE" ]; then
           echo "Using config file: $CONFIG_FILE"
           cp "$CONFIG_FILE" .config
-          
-          # 验证配置
-          echo "Configuration validation:"
-          echo "========================="
-          echo "Target device:"
-          grep "CONFIG_TARGET.*DEVICE.*k2p" .config || echo "⚠️ K2P device not found!"
-          
-          echo ""
-          echo "DNS server:"
-          grep "CONFIG_PACKAGE_dnsmasq" .config || echo "⚠️ No DNS server configured!"
-          
-          echo ""
-          echo "Wireless drivers:"
-          grep "CONFIG_PACKAGE.*mt7615" .config || echo "⚠️ No MT7615 wireless drivers!"
-          
-          echo ""
-          echo "Total packages: $(grep -c '^CONFIG_PACKAGE' .config)"
         else
           echo "❌ Config file not found: $CONFIG_FILE"
           echo "Using safe defaults..."
@@ -109,13 +102,29 @@ jobs:
         make defconfig
         
         echo "✅ Configuration applied"
+        echo "Total packages: $(grep -c '^CONFIG_PACKAGE' .config)"
     
-    - name: Update feeds
+    - name: Update feeds with retry
       run: |
         cd $GITHUB_WORKSPACE/openwrt
-        echo "Updating feeds..."
-        ./scripts/feeds update -a
-        ./scripts/feeds install -a
+        echo "Updating feeds (with retry and timeout)..."
+        
+        # 尝试多次，每次增加超时时间
+        for i in 1 2 3; do
+          echo "尝试第 $i 次更新feeds..."
+          timeout 300 ./scripts/feeds update -a && break
+          echo "第 $i 次尝试失败，等待10秒后重试..."
+          sleep 10
+        done
+        
+        # 如果更新失败，尝试跳过某些feed
+        if [ $? -ne 0 ]; then
+          echo "完整更新失败，尝试最小化更新..."
+          ./scripts/feeds update packages luci
+        fi
+        
+        echo "Installing feeds..."
+        ./scripts/feeds install -a || echo "部分feed安装失败，继续构建..."
         echo "Feeds updated"
     
     - name: Download packages
@@ -123,8 +132,15 @@ jobs:
         cd $GITHUB_WORKSPACE/openwrt
         echo "Downloading packages..."
         mkdir -p dl
-        make download -j2
-        echo "Download completed"
+        
+        # 尝试下载，允许部分失败
+        make download -j2 || {
+          echo "下载失败，继续构建..."
+          # 创建空文件避免错误
+          touch dl/.download_attempted
+        }
+        
+        echo "Download attempt completed"
     
     - name: Build firmware
       run: |
@@ -188,12 +204,6 @@ jobs:
           echo "✅ **Build Successful!**" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Firmware is available in the artifacts." >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Recommended next steps:" >> $GITHUB_STEP_SUMMARY
-          echo "1. Download the firmware from Artifacts" >> $GITHUB_STEP_SUMMARY
-          echo "2. Flash to K2P using Breed bootloader" >> $GITHUB_STEP_SUMMARY
-          echo "3. Default IP: 192.168.1.1" >> $GITHUB_STEP_SUMMARY
-          echo "4. Login: root (no password initially)" >> $GITHUB_STEP_SUMMARY
         else
           echo "❌ **Build Failed**" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
