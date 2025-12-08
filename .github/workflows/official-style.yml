@@ -8,104 +8,253 @@ on:
         required: true
         default: 'v24.10.4'
         type: string
+      with_luci:
+        description: 'Include LuCI web interface'
+        required: false
+        default: 'false'
+        type: boolean
+      clean_build:
+        description: 'Clean build (remove cache)'
+        required: false
+        default: 'false'
+        type: boolean
 
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 120
+    timeout-minutes: 150
     
     steps:
     - name: Checkout
       uses: actions/checkout@v4
     
-    - name: Setup
+    - name: Setup build environment
       run: |
         sudo apt-get update
-        sudo apt-get install -y build-essential libncurses5-dev git
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+          build-essential clang flex bison g++ gawk gcc-multilib \
+          g++-multilib gettext git libncurses5-dev libssl-dev python3 \
+          python3-pip python3-setuptools rsync unzip zlib1g-dev file wget \
+          time subversion libelf-dev
     
-    - name: Clone exact version
+    - name: Clone OpenWRT
       run: |
         cd $GITHUB_WORKSPACE
         VERSION="${{ github.event.inputs.openwrt_version }}"
-        echo "Cloning OpenWRT $VERSION..."
-        git clone https://github.com/openwrt/openwrt.git -b $VERSION --depth=1
-        cd openwrt
-        echo "Current commit: $(git log -1 --oneline)"
-    
-    - name: Create official-like config
-      run: |
-        cd $GITHUB_WORKSPACE/openwrt
+        echo "🚀 克隆 OpenWRT $VERSION..."
         
-        echo "创建类似官方的配置..."
-        
-        # 方法1：使用官方的defconfig（如果存在）
-        if make help | grep -q "defconfig.*k2p"; then
-          echo "使用官方defconfig"
-          make phicomm_k2p_defconfig || make defconfig
-        else
-          # 方法2：创建最小配置，让系统自动选择
-          echo "CONFIG_TARGET_ramips=y" > .config
-          echo "CONFIG_TARGET_ramips_mt7621=y" >> .config
-          echo "CONFIG_TARGET_ramips_mt7621_DEVICE_phicomm_k2p=y" >> .config
-          echo "CONFIG_TARGET_ROOTFS_SQUASHFS=y" >> .config
-          echo "CONFIG_TARGET_ROOTFS_PARTSIZE=16" >> .config
-          
-          # 让系统选择默认包
-          echo "CONFIG_ALL=y" >> .config
-          echo "CONFIG_ALL_KMODS=y" >> .config
-          echo "CONFIG_ALL_NONSHARED=y" >> .config
+        # 清理之前的构建
+        if [[ "${{ github.event.inputs.clean_build }}" == "true" ]]; then
+          rm -rf openwrt dl build_dir staging_dir tmp
         fi
         
-        # 关键：运行defconfig让系统填充默认值
-        echo "运行defconfig..."
-        make defconfig
-        
-        # 显示关键配置
-        echo "检查配置..."
-        grep -E "(TARGET|DEVICE|ROOTFS)" .config
+        if [ ! -d "openwrt" ]; then
+          git clone --progress https://github.com/openwrt/openwrt.git -b $VERSION
+        else
+          echo "已有openwrt目录，更新..."
+          cd openwrt
+          git fetch origin
+          git checkout $VERSION
+          git pull origin $VERSION
+        fi
     
-    - name: Build minimal
+    - name: Configure for K2P
       run: |
         cd $GITHUB_WORKSPACE/openwrt
         
-        echo "准备编译环境..."
+        echo "🔧 配置 K2P..."
+        
+        # 方法A：使用官方脚本生成配置
+        echo "方法A：使用目标设备配置"
+        cat > .config << 'CONFIG'
+CONFIG_TARGET_ramips=y
+CONFIG_TARGET_ramips_mt7621=y
+CONFIG_TARGET_ramips_mt7621_DEVICE_phicomm_k2p=y
+CONFIG_TARGET_ROOTFS_SQUASHFS=y
+CONFIG_TARGET_ROOTFS_PARTSIZE=16
+CONFIG_TARGET_IMAGES_GZIP=y
+CONFIG_VMLINUX_INITRD=n
+CONFIG_PACKAGE_dnsmasq=y
+CONFIG_PACKAGE_firewall=y
+CONFIG_PACKAGE_odhcpd-ipv6only=y
+CONFIG_PACKAGE_odhcp6c=y
+CONFIG_PACKAGE_kmod-mt7615e=y
+CONFIG_PACKAGE_kmod-mt7615-firmware=y
+CONFIG_PACKAGE_kmod-mt_wifi=y
+CONFIG_PACKAGE_wpad-openssl=y
+CONFIG_PACKAGE_hostapd-common=y
+CONFIG
+          
+        # 根据输入添加LuCI
+        if [[ "${{ github.event.inputs.with_luci }}" == "true" ]]; then
+          echo "添加LuCI支持..."
+          cat >> .config << 'CONFIG'
+CONFIG_PACKAGE_luci=y
+CONFIG_PACKAGE_luci-i18n-base-zh-cn=y
+CONFIG_PACKAGE_luci-app-firewall=y
+CONFIG_PACKAGE_luci-app-opkg=y
+CONFIG
+        fi
+        
+        # 运行defconfig填充其他配置
+        echo "运行 defconfig..."
+        make defconfig
+        
+        # 显示配置摘要
+        echo "📋 配置摘要:"
+        echo "========================================"
+        grep -E "^CONFIG_TARGET|^CONFIG_PACKAGE" .config | sort
+        echo "========================================"
+    
+    - name: Update feeds and download
+      run: |
+        cd $GITHUB_WORKSPACE/openwrt
+        
+        echo "📦 更新 feeds..."
         ./scripts/feeds update -a
         ./scripts/feeds install -a
         
-        echo "下载包..."
-        make download -j2 || true
+        echo "⬇️ 下载包..."
+        # 创建dl目录并尝试并行下载
+        mkdir -p dl
+        make download -j$(nproc) || make download -j2 || make download
         
-        echo "开始编译..."
-        # 使用详细输出
-        make -j2 V=s 2>&1 | tee build.log
-        
-        echo "编译完成，查找固件..."
+        # 检查是否所有包都已下载
+        echo "检查下载..."
+        if [ -f "tmp/.package-download-errors" ]; then
+          echo "⚠️  有包下载失败:"
+          cat tmp/.package-download-errors
+          echo "尝试继续构建..."
+        fi
     
-    - name: Verify output
+    - name: Build firmware
       run: |
         cd $GITHUB_WORKSPACE/openwrt
         
-        echo "查找固件: openwrt-*-phicomm_k2p-*.bin"
+        echo "🔨 开始编译..."
+        START_TIME=$(date +%s)
         
-        # 按照官方命名格式查找
-        EXPECTED_NAME="openwrt-*-ramips-mt7621-phicomm_k2p-squashfs-sysupgrade.bin"
-        
-        if find . -name "$EXPECTED_NAME" -type f | grep -q .; then
-          echo "✅ 找到官方格式固件！"
-          find . -name "$EXPECTED_NAME" -type f -exec echo "  {} ($(du -h {} | cut -f1))" \;
+        # 根据CPU核心数设置并行度
+        CPU_CORES=$(nproc)
+        if [ $CPU_CORES -gt 4 ]; then
+          JOBS=$((CPU_CORES - 2))
+        elif [ $CPU_CORES -gt 2 ]; then
+          JOBS=$((CPU_CORES - 1))
         else
-          echo "搜索所有可能的固件..."
-          find . -name "*.bin" -type f | head -20
+          JOBS=2
+        fi
+        
+        echo "使用 $JOBS 个并行任务"
+        
+        # 编译内核和基础包
+        echo "编译内核..."
+        make -j$JOBS target/linux/compile
+        
+        # 编译固件
+        echo "编译固件..."
+        make -j$JOBS V=s 2>&1 | tee build.log
+        
+        END_TIME=$(date +%s)
+        DURATION=$((END_TIME - START_TIME))
+        echo "⏱️  编译耗时: $((DURATION / 60))分$((DURATION % 60))秒"
+        
+        # 检查编译结果
+        if [ $? -eq 0 ]; then
+          echo "✅ 编译成功!"
+        else
+          echo "❌ 编译失败"
           
-          echo "检查目标目录结构..."
-          find bin -type d 2>/dev/null | head -20 || echo "无bin目录"
+          # 显示最后100行日志
+          echo "最后100行日志:"
+          tail -100 build.log
+          
+          # 检查常见错误
+          grep -i "error\|failed\|missing" build.log | tail -20
+          exit 1
         fi
     
-    - name: Upload results
+    - name: Find and verify firmware
+      run: |
+        cd $GITHUB_WORKSPACE/openwrt
+        
+        echo "🔍 查找固件..."
+        
+        # 查看目标目录
+        if [ -d "bin/targets/ramips/mt7621" ]; then
+          echo "📁 目标目录内容:"
+          ls -la bin/targets/ramips/mt7621/
+          
+          echo "📊 固件文件:"
+          for file in bin/targets/ramips/mt7621/*.bin; do
+            if [ -f "$file" ]; then
+              SIZE=$(du -h "$file" | cut -f1)
+              echo "  $(basename "$file") - $SIZE"
+            fi
+          done
+          
+          # 检查sysupgrade固件
+          SYS_FILE=$(ls bin/targets/ramips/mt7621/*sysupgrade*.bin 2>/dev/null | head -1)
+          if [ -n "$SYS_FILE" ] && [ -f "$SYS_FILE" ]; then
+            echo "✅ 找到系统升级固件: $(basename "$SYS_FILE")"
+            echo "   大小: $(du -h "$SYS_FILE" | cut -f1)"
+            echo "   MD5: $(md5sum "$SYS_FILE" | cut -d' ' -f1)"
+            
+            # 验证固件格式
+            echo "🔬 验证固件格式..."
+            if hexdump -C "$SYS_FILE" | head -5 | grep -q "OpenWrt"; then
+              echo "   包含OpenWrt标识"
+            fi
+            
+            # 创建固件信息文件
+            cat > firmware-info.txt << INFO
+固件信息:
+==========
+文件名: $(basename "$SYS_FILE")
+大小: $(du -h "$SYS_FILE" | cut -f1)
+MD5: $(md5sum "$SYS_FILE" | cut -d' ' -f1)
+SHA256: $(sha256sum "$SYS_FILE" | cut -d' ' -f1)
+编译时间: $(date)
+OpenWRT版本: ${{ github.event.inputs.openwrt_version }}
+包含LuCI: ${{ github.event.inputs.with_luci }}
+INFO
+          else
+            echo "❌ 未找到sysupgrade固件"
+            echo "可用文件:"
+            find bin/targets -name "*.bin" -type f | head -10
+          fi
+        else
+          echo "❌ 目标目录不存在: bin/targets/ramips/mt7621"
+          echo "尝试查找其他位置..."
+          find . -name "*.bin" -type f | head -20
+        fi
+    
+    - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: official-build-${{ github.event.inputs.openwrt_version }}
+        name: k2p-official-${{ github.event.inputs.openwrt_version }}-${{ github.run_number }}
         path: |
-          ${{ github.workspace }}/openwrt/bin/**
+          ${{ github.workspace }}/openwrt/bin/targets/ramips/mt7621/*.bin
           ${{ github.workspace }}/openwrt/.config
           ${{ github.workspace }}/openwrt/build.log
+          ${{ github.workspace }}/openwrt/firmware-info.txt
+          ${{ github.workspace }}/openwrt/bin/targets/ramips/mt7621/sha256sums
+          ${{ github.workspace }}/openwrt/bin/targets/ramips/mt7621/config.buildinfo
+        retention-days: 7
+        if-no-files-found: error
+    
+    - name: Create summary
+      if: always()
+      run: |
+        echo "## 构建总结" >> $GITHUB_STEP_SUMMARY
+        echo "- OpenWRT版本: ${{ github.event.inputs.openwrt_version }}" >> $GITHUB_STEP_SUMMARY
+        echo "- 包含LuCI: ${{ github.event.inputs.with_luci }}" >> $GITHUB_STEP_SUMMARY
+        echo "- 编译状态: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
+        
+        # 如果有固件信息文件，显示详情
+        if [ -f "${{ github.workspace }}/openwrt/firmware-info.txt" ]; then
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 固件信息" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat "${{ github.workspace }}/openwrt/firmware-info.txt" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+        fi
