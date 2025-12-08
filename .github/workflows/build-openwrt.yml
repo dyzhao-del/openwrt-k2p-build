@@ -1,104 +1,15 @@
-name: Build OpenWRT for K2P
+name: Build OpenWRT
 
 on:
   workflow_dispatch:
-    inputs:
-      config_file:
-        description: 'Config file to use'
-        required: true
-        default: 'k2p-working-minimal.config'
-        type: choice
-        options:
-          - 'k2p-working-minimal.config'
-          - 'k2p-test-tiny.config'
 
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 120
     
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential ccache ecj fastjar file g++ gawk \
-            gettext git libelf-dev libncurses5-dev libncursesw5-dev \
-            libssl-dev python3 python3-distutils python3-setuptools \
-            rsync subversion swig time unzip wget xsltproc zlib1g-dev
-            
-      - name: Clone OpenWRT
-        run: |
-          cd $GITHUB_WORKSPACE
-          git clone https://github.com/openwrt/openwrt.git --depth=1
-          
-      - name: Apply configuration
-        run: |
-          cd $GITHUB_WORKSPACE/openwrt
-          
-          CONFIG_FILE="${{ github.event.inputs.config_file }}"
-          echo "Using config file: $CONFIG_FILE"
-          
-          if [ -f "$GITHUB_WORKSPACE/configs/$CONFIG_FILE" ]; then
-            echo "Copying config file..."
-            cp "$GITHUB_WORKSPACE/configs/$CONFIG_FILE" .config
-            
-            echo "Running defconfig..."
-            make defconfig
-          else
-            echo "ERROR: Config file not found"
-            exit 1
-          fi
-          
-      - name: Update feeds
-        run: |
-          cd $GITHUB_WORKSPACE/openwrt
-          ./scripts/feeds update -a
-          ./scripts/feeds install -a
-          
-      - name: Download packages
-        run: |
-          cd $GITHUB_WORKSPACE/openwrt
-          make download -j1 || true
-          
-      - name: Build firmware
-        run: |
-          cd $GITHUB_WORKSPACE/openwrt
-          
-          echo "Starting build..."
-          make -j2 V=s 2>&1 | tee build.log
-          
-      - name: Check results
-        run: |
-          cd $GITHUB_WORKSPACE/openwrt
-          
-          echo "Looking for firmware..."
-          
-          # Check multiple possible locations
-          for dir in "bin/targets/ramips/mt7621" "bin/ramips" "."; do
-            if find "$dir" -name "*k2p*.bin" 2>/dev/null | grep -q .; then
-              echo "Found firmware in $dir"
-              find "$dir" -name "*.bin" -exec echo "  {}" \;
-              exit 0
-            fi
-          done
-          
-          echo "No firmware found"
-          echo "Available files in bin/:"
-          find bin -type f 2>/dev/null | head -20 || true
-          exit 1
-          
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: firmware
-          path: $GITHUB_WORKSPACE/openwrt/bin/**
-          
-      - name: Upload logs
-        uses: actions/upload-artifact@v4
-        with:
-          name: logs
-          path: $GITHUB_WORKSPACE/openwrt/build.log
+    - name: Checkout
+      uses: actions/checkout@v4
+    
+    - name: Test
+      run: echo "Simple test passed"

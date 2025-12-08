@@ -1,0 +1,186 @@
+name: Build OpenWRT for Phicomm K2P
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_stage:
+        description: 'Build Stage'
+        required: true
+        default: '2'
+        type: choice
+        options:
+        - '1'
+        - '2'
+        - '3'
+      clean_build:
+        description: 'Clean Build'
+        required: false
+        default: false
+        type: boolean
+  
+  push:
+    branches: [main]
+    paths:
+    - 'configs/**'
+    - '.github/workflows/**'
+
+env:
+  OPENWRT_VERSION: "v23.05.3"
+  DEVICE_NAME: "phicomm_k2p"
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+      
+    - name: Setup Build Environment
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential ccache ecj fastjar file g++ gawk \
+          gettext git java-propose-classpath libelf-dev libncurses5-dev libncursesw5-dev \
+          libssl-dev python3 python3-distutils python3-setuptools python3-pip \
+          rsync subversion swig time unzip wget xsltproc zlib1g-dev \
+          python3-pyelftools cmake python3-dev p7zip-full jq lzma cpio
+        
+    - name: Clone OpenWRT Source
+      run: |
+        cd $GITHUB_WORKSPACE
+        git clone https://github.com/openwrt/openwrt.git -b ${{ env.OPENWRT_VERSION }} --depth=1
+        
+    - name: Setup Build Cache
+      if: ${{ !github.event.inputs.clean_build }}
+      uses: actions/cache@v4
+      with:
+        path: ${{ github.workspace }}/openwrt/dl
+        key: ${{ runner.os }}-openwrt-dl-${{ env.OPENWRT_VERSION }}-${{ hashFiles('configs/device-phicomm_k2p.yml') }}
+        restore-keys: |
+          ${{ runner.os }}-openwrt-dl-${{ env.OPENWRT_VERSION }}-
+          
+    - name: Setup ccache
+      uses: hendrikmuhs/ccache-action@v1.2
+      with:
+        key: ccache-${{ runner.os }}-${{ env.OPENWRT_VERSION }}
+        
+    - name: Update Feeds
+      run: |
+        cd $GITHUB_WORKSPACE/openwrt
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+        
+    - name: Apply Configuration
+      id: apply-config
+      run: |
+        cd $GITHUB_WORKSPACE/openwrt
+        
+        # Determine build stage
+        if [ -n "${{ github.event.inputs.build_stage }}" ]; then
+          BUILD_STAGE="${{ github.event.inputs.build_stage }}"
+        else
+          BUILD_STAGE="2"
+        fi
+        
+        echo "Build stage: $BUILD_STAGE"
+        
+        # Select config file
+        if [ "$BUILD_STAGE" = "1" ]; then
+          CONFIG_FILE="k2p-minimal.config"
+        elif [ "$BUILD_STAGE" = "2" ]; then
+          CONFIG_FILE="k2p-stage2-extended.config"
+        elif [ "$BUILD_STAGE" = "3" ]; then
+          CONFIG_FILE="k2p-stage3-advanced.config"
+        else
+          CONFIG_FILE="k2p-stage2-extended.config"
+        fi
+        
+        echo "Config file: $CONFIG_FILE"
+        
+        # Copy config file
+        if [ -f "$GITHUB_WORKSPACE/configs/$CONFIG_FILE" ]; then
+          cp "$GITHUB_WORKSPACE/configs/$CONFIG_FILE" .config
+          echo "Config file applied successfully"
+        else
+          echo "Error: Config file not found: $CONFIG_FILE"
+          ls -la "$GITHUB_WORKSPACE/configs/"
+          exit 1
+        fi
+        
+        # Generate full config
+        make defconfig
+        
+        # Count enabled packages
+        PACKAGE_COUNT=$(grep "^CONFIG_PACKAGE" .config | grep "=y$" | wc -l)
+        echo "Enabled packages: $PACKAGE_COUNT"
+        
+    - name: Download Packages
+      run: |
+        cd $GITHUB_WORKSPACE/openwrt
+        make download -j$(nproc) || make download -j1
+        
+    - name: Build Firmware
+      run: |
+        cd $GITHUB_WORKSPACE/openwrt
+        
+        # Create build info
+        echo "Build Information" > build-info.txt
+        echo "================" >> build-info.txt
+        echo "Date: $(date)" >> build-info.txt
+        echo "Stage: ${{ steps.apply-config.outputs.BUILD_STAGE || '2' }}" >> build-info.txt
+        echo "Version: ${{ env.OPENWRT_VERSION }}" >> build-info.txt
+        
+        # Build firmware
+        echo "Starting build..."
+        make -j$(($(nproc) + 1)) V=s 2>&1 | tee build.log
+        
+    - name: Check Build Result
+      if: success()
+      run: |
+        cd $GITHUB_WORKSPACE/openwrt
+        
+        FIRMWARE="bin/targets/ramips/mt7621/openwrt-ramips-mt7621-phicomm_k2p-squashfs-sysupgrade.bin"
+        
+        if [ -f "$FIRMWARE" ]; then
+          echo "✅ Firmware built successfully!"
+          
+          # Check file size
+          SIZE=$(stat -c%s "$FIRMWARE")
+          MAX_SIZE=16777216  # 16MB
+          
+          echo "File size: $((SIZE / 1024 / 1024))MB"
+          
+          if [ $SIZE -gt $MAX_SIZE ]; then
+            echo "❌ Firmware too large! Maximum is 16MB"
+            exit 1
+          else
+            echo "✅ Firmware size is within limits"
+          fi
+          
+          # Generate checksums
+          cd bin/targets/ramips/mt7621
+          sha256sum * > sha256sums.txt
+          md5sum * > md5sums.txt
+        else
+          echo "❌ Firmware file not found!"
+          exit 1
+        fi
+        
+    - name: Upload Artifacts
+      if: success()
+      uses: actions/upload-artifact@v4
+      with:
+        name: openwrt-k2p-firmware
+        path: |
+          ${{ github.workspace }}/openwrt/bin/targets/ramips/mt7621/*
+          ${{ github.workspace }}/openwrt/build-info.txt
+        retention-days: 7
+        
+    - name: Upload Build Log
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-log
+        path: ${{ github.workspace }}/openwrt/build.log
+        retention-days: 7

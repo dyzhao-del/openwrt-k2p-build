@@ -1,0 +1,23 @@
+name: Test Simple Build
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-22.04
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Simple test
+        run: |
+          echo "Hello from GitHub Actions"
+          echo "Testing heredoc..."
+          cat > test.txt << 'TEST_EOF'
+          Line 1
+          Line 2
+          Line 3
+          TEST_EOF
+          cat test.txt
