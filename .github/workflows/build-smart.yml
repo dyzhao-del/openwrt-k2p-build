@@ -1,0 +1,161 @@
+name: Build Smart
+
+on:
+  workflow_dispatch:
+    inputs:
+      config_level:
+        description: 'Configuration level'
+        required: true
+        default: 'webui'
+        type: choice
+        options:
+          - 'minimal'
+          - 'webui'
+          - 'extended'
+      openwrt_version:
+        description: 'OpenWRT version'
+        required: false
+        default: 'v23.05.3'
+
+jobs:
+  smart-build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 150
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+    
+    - name: Setup
+      run: |
+        sudo apt-get update
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+          build-essential ccache file g++ gawk gettext git \
+          libncurses5-dev libncursesw5-dev libssl-dev python3 \
+          rsync unzip wget zlib1g-dev
+    
+    - name: Clone OpenWRT
+      run: |
+        cd $GITHUB_WORKSPACE
+        git clone https://github.com/openwrt/openwrt.git --branch ${{ github.event.inputs.openwrt_version }} --depth=1
+        echo "OpenWRT ${{ github.event.inputs.openwrt_version }} cloned"
+    
+    - name: Select configuration
+      id: select-config
+      run: |
+        CONFIG_LEVEL="${{ github.event.inputs.config_level }}"
+        
+        case "$CONFIG_LEVEL" in
+          "minimal")
+            CONFIG_FILE="k2p-reliable.config"
+            ;;
+          "webui")
+            CONFIG_FILE="k2p-with-webui.config"
+            ;;
+          "extended")
+            CONFIG_FILE="k2p-full-extended.config"
+            ;;
+          *)
+            CONFIG_FILE="k2p-reliable.config"
+            ;;
+        esac
+        
+        echo "Selected config: $CONFIG_FILE"
+        echo "CONFIG_FILE=$CONFIG_FILE" >> $GITHUB_OUTPUT
+        
+        # 检查配置文件是否存在
+        if [ ! -f "configs/$CONFIG_FILE" ]; then
+          echo "Error: Config file not found: $CONFIG_FILE"
+          exit 1
+        fi
+    
+    - name: Apply and build
+      run: |
+        cd $GITHUB_WORKSPACE/openwrt
+        
+        echo "Applying configuration: ${{ steps.select-config.outputs.CONFIG_FILE }}"
+        cp "$GITHUB_WORKSPACE/configs/${{ steps.select-config.outputs.CONFIG_FILE }}" .config
+        
+        # 准备构建环境
+        make defconfig
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+        
+        echo "Downloading packages..."
+        make download -j2 || make download -j1
+        
+        echo "Starting compilation..."
+        make -j2 V=s 2>&1 | tee build.log
+        
+    - name: Analyze result
+      if: success()
+      run: |
+        cd $GITHUB_WORKSPACE/openwrt
+        
+        echo "📊 Build Analysis"
+        echo "================="
+        
+        # 查找固件
+        FIRMWARE=$(find . -name "*phicomm_k2p*.bin" -type f | head -1)
+        
+        if [ -z "$FIRMWARE" ]; then
+          echo "❌ No K2P firmware found"
+          exit 1
+        fi
+        
+        # 计算大小
+        SIZE_BYTES=$(stat -c%s "$FIRMWARE")
+        SIZE_MB=$(echo "scale=2; $SIZE_BYTES / 1024 / 1024" | bc)
+        MAX_MB=16
+        REMAINING_MB=$(echo "scale=2; $MAX_MB - $SIZE_MB" | bc)
+        
+        echo "Firmware: $(basename $FIRMWARE)"
+        echo "Size: ${SIZE_MB}MB"
+        echo "Limit: ${MAX_MB}MB"
+        echo "Remaining: ${REMAINING_MB}MB"
+        
+        # 建议
+        if (( $(echo "$SIZE_MB > 15" | bc -l) )); then
+          echo "⚠️  Warning: Firmware接近容量上限"
+          echo "建议：移除一些非核心包"
+        elif (( $(echo "$SIZE_MB > 10" | bc -l) )); then
+          echo "⚠️  注意：还有空间添加更多功能"
+          echo "剩余空间约: ${REMAINING_MB}MB"
+        else
+          echo "✅ 良好：充足的空间可用于扩展"
+          echo "可添加约: ${REMAINING_MB}MB 的额外功能"
+        fi
+        
+        # 保存分析结果
+        echo "BUILD_LEVEL=${{ github.event.inputs.config_level }}" >> $GITHUB_ENV
+        echo "FIRMWARE_SIZE_MB=$SIZE_MB" >> $GITHUB_ENV
+        echo "REMAINING_SPACE_MB=$REMAINING_MB" >> $GITHUB_ENV
+    
+    - name: Upload results
+      uses: actions/upload-artifact@v4
+      with:
+        name: openwrt-${{ steps.select-config.outputs.CONFIG_FILE }}-${{ github.run_number }}
+        path: |
+          ${{ github.workspace }}/openwrt/bin/targets/**
+          ${{ github.workspace }}/openwrt/.config
+        retention-days: 14
+    
+    - name: Create summary
+      if: success()
+      run: |
+        echo "# Build Summary" > summary.md
+        echo "## Configuration: ${{ env.BUILD_LEVEL }}" >> summary.md
+        echo "### Firmware Size: ${{ env.FIRMWARE_SIZE_MB }}MB" >> summary.md
+        echo "### Remaining Space: ${{ env.REMAINING_SPACE_MB }}MB" >> summary.md
+        echo "" >> summary.md
+        echo "### Recommendations:" >> summary.md
+        
+        if (( $(echo "${{ env.REMAINING_SPACE_MB }} > 3" | bc -l) )); then
+          echo "- ✅ 可以添加更多功能 (Luci应用、工具等)" >> summary.md
+        elif (( $(echo "${{ env.REMAINING_SPACE_MB }} > 1" | bc -l) )); then
+          echo "- ⚠️  空间有限，只能添加少量功能" >> summary.md
+        else
+          echo "- ❌ 空间不足，需要精简现有功能" >> summary.md
+        fi
+        
+        cat summary.md
