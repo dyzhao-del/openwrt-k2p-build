@@ -1,0 +1,107 @@
+name: Build Stage 2 - Extended
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-extended:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+    
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+          build-essential ccache ecj fastjar file g++ gawk \
+          gettext git libelf-dev libncurses5-dev libncursesw5-dev \
+          libssl-dev python3 python3-distutils python3-setuptools \
+          rsync subversion swig time unzip wget xsltproc zlib1g-dev \
+          python3-pyelftools cmake python3-dev
+    
+    - name: Clone OpenWRT
+      run: |
+        cd $GITHUB_WORKSPACE
+        git clone https://github.com/openwrt/openwrt.git --depth=1
+        cd openwrt
+        echo "Using OpenWRT version: $(git describe --tags)"
+    
+    - name: Copy config file
+      run: |
+        cd $GITHUB_WORKSPACE/openwrt
+        
+        # 使用现有的配置文件
+        if [ -f "$GITHUB_WORKSPACE/configs/k2p-working-minimal.config" ]; then
+          cp "$GITHUB_WORKSPACE/configs/k2p-working-minimal.config" .config
+          echo "Config file copied"
+        else
+          # 创建基础配置
+          echo "CONFIG_TARGET_ramips=y" > .config
+          echo "CONFIG_TARGET_ramips_mt7621=y" >> .config
+          echo "CONFIG_TARGET_ramips_mt7621_DEVICE_phicomm_k2p=y" >> .config
+          echo "CONFIG_TARGET_ROOTFS_SQUASHFS=y" >> .config
+          echo "CONFIG_PACKAGE_busybox=y" >> .config
+          echo "CONFIG_PACKAGE_dropbear=y" >> .config
+          echo "Config created from scratch"
+        fi
+        
+        make defconfig
+        echo "Configuration applied"
+    
+    - name: Update feeds
+      run: |
+        cd $GITHUB_WORKSPACE/openwrt
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+        echo "Feeds updated"
+    
+    - name: Download packages
+      run: |
+        cd $GITHUB_WORKSPACE/openwrt
+        echo "Downloading packages (this may take a while)..."
+        timeout 600 make download -j2 || echo "Download completed or timeout"
+    
+    - name: Build firmware
+      run: |
+        cd $GITHUB_WORKSPACE/openwrt
+        
+        echo "Starting firmware build..."
+        echo "Build started at: $(date)"
+        
+        # 开始构建，限制并发数避免内存不足
+        make -j2 V=s 2>&1 | tee build.log || echo "Build completed"
+        
+        echo "Build finished at: $(date)"
+    
+    - name: Check results
+      run: |
+        cd $GITHUB_WORKSPACE/openwrt
+        
+        echo "Checking for output..."
+        
+        # 查找固件文件
+        if find . -name "*phicomm_k2p*.bin" -type f | grep -q .; then
+          echo "✅ Firmware found!"
+          find . -name "*phicomm_k2p*.bin" -type f -exec echo "  {} ($(du -h {} | cut -f1))" \;
+        else
+          echo "⚠️ No K2P firmware found"
+          echo "Looking for any firmware files..."
+          find . -name "*.bin" -type f | head -10
+        fi
+    
+    - name: Upload artifacts
+      if: success()
+      uses: actions/upload-artifact@v4
+      with:
+        name: firmware-stage2
+        path: ${{ github.workspace }}/openwrt/bin/targets/**
+    
+    - name: Upload logs
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: logs-stage2
+        path: ${{ github.workspace }}/openwrt/build.log

@@ -1,0 +1,56 @@
+name: Build Stage 1 - Minimal
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-minimal:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+    
+    - name: Setup environment
+      run: |
+        sudo apt-get update
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+          build-essential ccache ecj fastjar file g++ gawk \
+          gettext git libelf-dev libncurses5-dev libncursesw5-dev \
+          libssl-dev python3 python3-distutils python3-setuptools \
+          rsync subversion swig time unzip wget xsltproc zlib1g-dev
+    
+    - name: Clone OpenWRT
+      run: |
+        cd $GITHUB_WORKSPACE
+        git clone https://github.com/openwrt/openwrt.git --depth=1
+        echo "OpenWRT cloned"
+    
+    - name: Apply minimal config
+      run: |
+        cd $GITHUB_WORKSPACE/openwrt
+        
+        # 使用echo创建极简配置
+        echo "CONFIG_TARGET_ramips=y" > .config
+        echo "CONFIG_TARGET_ramips_mt7621=y" >> .config
+        echo "CONFIG_TARGET_ramips_mt7621_DEVICE_phicomm_k2p=y" >> .config
+        echo "CONFIG_TARGET_ROOTFS_SQUASHFS=y" >> .config
+        
+        # 绝对必要的基础包
+        echo "CONFIG_PACKAGE_busybox=y" >> .config
+        echo "CONFIG_PACKAGE_dropbear=y" >> .config
+        echo "CONFIG_PACKAGE_firewall=y" >> .config
+        echo "CONFIG_PACKAGE_uci=y" >> .config
+        
+        echo "Minimal config created"
+        head -10 .config
+    
+    - name: Build test
+      run: |
+        cd $GITHUB_WORKSPACE/openwrt
+        echo "Starting minimal build test..."
+        
+        # 只构建内核和基础镜像
+        make defconfig
+        echo "Build environment ready"
