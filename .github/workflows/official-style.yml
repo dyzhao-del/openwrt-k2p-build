@@ -64,8 +64,7 @@ jobs:
         
         echo "🔧 配置 K2P..."
         
-        # 方法A：使用官方脚本生成配置
-        echo "方法A：使用目标设备配置"
+        # 创建配置
         cat > .config << 'CONFIG'
 CONFIG_TARGET_ramips=y
 CONFIG_TARGET_ramips_mt7621=y
@@ -84,7 +83,7 @@ CONFIG_PACKAGE_kmod-mt_wifi=y
 CONFIG_PACKAGE_wpad-openssl=y
 CONFIG_PACKAGE_hostapd-common=y
 CONFIG
-          
+        
         # 根据输入添加LuCI
         if [[ "${{ github.event.inputs.with_luci }}" == "true" ]]; then
           echo "添加LuCI支持..."
@@ -146,10 +145,6 @@ CONFIG
         
         echo "使用 $JOBS 个并行任务"
         
-        # 编译内核和基础包
-        echo "编译内核..."
-        make -j$JOBS target/linux/compile
-        
         # 编译固件
         echo "编译固件..."
         make -j$JOBS V=s 2>&1 | tee build.log
@@ -206,7 +201,7 @@ CONFIG
             fi
             
             # 创建固件信息文件
-            cat > firmware-info.txt << INFO
+            cat > firmware-info.txt << 'INFO'
 固件信息:
 ==========
 文件名: $(basename "$SYS_FILE")
