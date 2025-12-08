@@ -1,0 +1,115 @@
+name: Test Optimized Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      test_config:
+        description: 'Test configuration'
+        required: true
+        default: 'light'
+        type: choice
+        options:
+          - 'light'
+          - 'minimal'
+          - 'custom'
+
+jobs:
+  test-build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+    
+    - name: Setup
+      run: |
+        sudo apt-get update
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+          build-essential g++ gawk gettext git libncurses5-dev \
+          libssl-dev python3 rsync unzip wget zlib1g-dev
+    
+    - name: Clone OpenWRT
+      run: |
+        cd $GITHUB_WORKSPACE
+        git clone https://github.com/openwrt/openwrt.git --branch v23.05.3 --depth=1
+    
+    - name: Select test config
+      run: |
+        cd $GITHUB_WORKSPACE/openwrt
+        
+        TEST_CONFIG="${{ github.event.inputs.test_config }}"
+        
+        case "$TEST_CONFIG" in
+          "light")
+            CONFIG_FILE="k2p-webui-light.config"
+            echo "Testing light webui config"
+            ;;
+          "minimal")
+            CONFIG_FILE="k2p-reliable.config"
+            echo "Testing minimal config (baseline)"
+            ;;
+          *)
+            CONFIG_FILE="k2p-reliable.config"
+            ;;
+        esac
+        
+        if [ -f "$GITHUB_WORKSPACE/configs/$CONFIG_FILE" ]; then
+          cp "$GITHUB_WORKSPACE/configs/$CONFIG_FILE" .config
+          echo "Using: $CONFIG_FILE"
+        else
+          echo "Config not found, using default"
+          echo "CONFIG_TARGET_ramips=y" > .config
+          echo "CONFIG_TARGET_ramips_mt7621=y" >> .config
+          echo "CONFIG_TARGET_ramips_mt7621_DEVICE_phicomm_k2p=y" >> .config
+        fi
+        
+        make defconfig
+    
+    - name: Quick build test
+      run: |
+        cd $GITHUB_WORKSPACE/openwrt
+        
+        echo "Quick build test..."
+        echo "This will build only essential components"
+        
+        # 构建基础镜像
+        make -j1 V=s kernel_oldconfig prepare 2>&1 | tail -50
+        
+        echo "Build environment test completed"
+    
+    - name: Estimate size
+      run: |
+        cd $GITHUB_WORKSPACE/openwrt
+        
+        echo "📊 Size Estimation"
+        echo "================="
+        
+        # 计算启用的包数量
+        PACKAGE_COUNT=$(grep "^CONFIG_PACKAGE.*=y$" .config | wc -l)
+        LUCI_COUNT=$(grep "^CONFIG_PACKAGE_luci" .config | grep "=y$" | wc -l)
+        KMOD_COUNT=$(grep "^CONFIG_PACKAGE_kmod" .config | grep "=y$" | wc -l)
+        
+        echo "Packages enabled: $PACKAGE_COUNT"
+        echo "Luci packages: $LUCI_COUNT"
+        echo "Kernel modules: $KMOD_COUNT"
+        
+        # 简单大小估算
+        BASE_SIZE=8.0  # 基础系统约8MB
+        LUCI_SIZE=$(echo "scale=2; $LUCI_COUNT * 0.3" | bc)
+        TOOLS_SIZE=$(echo "scale=2; ($PACKAGE_COUNT - $LUCI_COUNT - $KMOD_COUNT) * 0.1" | bc)
+        ESTIMATED_SIZE=$(echo "scale=2; $BASE_SIZE + $LUCI_SIZE + $TOOLS_SIZE" | bc)
+        
+        echo ""
+        echo "Estimated firmware size: ${ESTIMATED_SIZE}MB"
+        echo "Target limit: 16.0MB"
+        
+        if (( $(echo "$ESTIMATED_SIZE > 16" | bc -l) )); then
+          echo "❌ 预计超过限制"
+          echo "建议减少 $(( $(echo "$ESTIMATED_SIZE - 16" | bc) ))MB"
+        elif (( $(echo "$ESTIMATED_SIZE > 15" | bc -l) )); then
+          echo "⚠️  接近限制，空间紧张"
+        else
+          echo "✅ 预计在限制内"
+          echo "剩余空间约: $(echo "16 - $ESTIMATED_SIZE" | bc)MB"
+        fi

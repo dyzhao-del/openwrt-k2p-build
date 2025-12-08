@@ -1,0 +1,126 @@
+name: Final K2P Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      include_webui:
+        description: 'Include web interface'
+        required: true
+        default: 'yes'
+        type: choice
+        options:
+          - 'yes'
+          - 'no'
+          - 'minimal'
+
+jobs:
+  final:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+    
+    - name: Prepare
+      run: |
+        sudo apt-get update
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+          build-essential g++ gawk gettext git libncurses5-dev \
+          libssl-dev python3 rsync unzip wget zlib1g-dev
+    
+    - name: Build configuration
+      id: build-config
+      run: |
+        INCLUDE_WEBUI="${{ github.event.inputs.include_webui }}"
+        
+        # 生成动态配置
+        CONFIG_CONTENT=""
+        CONFIG_CONTENT+="CONFIG_TARGET_ramips=y\n"
+        CONFIG_CONTENT+="CONFIG_TARGET_ramips_mt7621=y\n"
+        CONFIG_CONTENT+="CONFIG_TARGET_ramips_mt7621_DEVICE_phicomm_k2p=y\n"
+        CONFIG_CONTENT+="CONFIG_TARGET_ROOTFS_SQUASHFS=y\n"
+        CONFIG_CONTENT+="CONFIG_TARGET_ROOTFS_PARTSIZE=16\n"
+        
+        # 基础包
+        BASE_PACKAGES="busybox base-files dnsmasq dropbear firewall fstools \
+          iptables iw iwinfo libc libgcc libustream-openssl logd mtd netifd \
+          odhcp6c odhcpd-ipv6only opkg procd swconfig uboot-envtools uci \
+          uclient-fetch urandom-seed wireless-regdb wpad-basic default-settings \
+          kmod-mt7603 kmod-mt7615e kmod-mt7621"
+        
+        for pkg in $BASE_PACKAGES; do
+          CONFIG_CONTENT+="CONFIG_PACKAGE_${pkg}=y\n"
+        done
+        
+        # Web界面选项
+        if [ "$INCLUDE_WEBUI" = "yes" ]; then
+          CONFIG_CONTENT+="CONFIG_PACKAGE_luci=y\n"
+          CONFIG_CONTENT+="CONFIG_PACKAGE_luci-base=y\n"
+          CONFIG_CONTENT+="CONFIG_PACKAGE_luci-compat=y\n"
+          CONFIG_CONTENT+="CONFIG_PACKAGE_luci-theme-bootstrap=y\n"
+          CONFIG_CONTENT+="CONFIG_PACKAGE_luci-app-firewall=y\n"
+          CONFIG_CONTENT+="CONFIG_PACKAGE_nano=y\n"
+          CONFIG_CONTENT+="CONFIG_PACKAGE_curl=y\n"
+        elif [ "$INCLUDE_WEBUI" = "minimal" ]; then
+          CONFIG_CONTENT+="CONFIG_PACKAGE_luci=y\n"
+          CONFIG_CONTENT+="CONFIG_PACKAGE_luci-base=y\n"
+          CONFIG_CONTENT+="CONFIG_PACKAGE_luci-compat=y\n"
+          CONFIG_CONTENT+="CONFIG_PACKAGE_nano=y\n"
+        fi
+        
+        echo "Generated config with $INCLUDE_WEBUI webui"
+        echo "config_lines=$(echo -e "$CONFIG_CONTENT" | wc -l)" >> $GITHUB_OUTPUT
+        
+        # 保存配置
+        echo -e "$CONFIG_CONTENT" > dynamic.config
+        echo "Config saved to dynamic.config"
+    
+    - name: Build
+      run: |
+        cd $GITHUB_WORKSPACE
+        
+        # 克隆和配置
+        git clone https://github.com/openwrt/openwrt.git --depth=1
+        cd openwrt
+        
+        cp ../dynamic.config .config
+        make defconfig
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+        make download -j1
+        make -j2 V=s 2>&1 | tee build.log
+    
+    - name: Verify
+      if: success()
+      run: |
+        cd $GITHUB_WORKSPACE/openwrt
+        
+        FW=$(find . -name "*k2p*.bin" -type f | head -1)
+        if [ -z "$FW" ]; then
+          echo "No firmware found"
+          exit 1
+        fi
+        
+        SIZE=$(stat -c%s "$FW")
+        SIZE_MB=$(echo "scale=2; $SIZE / 1024 / 1024" | bc)
+        
+        echo "Firmware: $(basename $FW)"
+        echo "Size: ${SIZE_MB}MB"
+        
+        if (( $(echo "$SIZE_MB > 16" | bc -l) )); then
+          echo "❌ TOO LARGE - 需要优化"
+          exit 1
+        elif (( $(echo "$SIZE_MB > 15.5" | bc -l) )); then
+          echo "⚠️ 接近限制 - 功能完整"
+        else
+          echo "✅ 良好 - 有扩展空间"
+        fi
+        
+        echo "FIRMWARE_SIZE=$SIZE_MB" >> $GITHUB_ENV
+    
+    - name: Upload
+      uses: actions/upload-artifact@v4
+      with:
+        name: k2p-final-${{ github.event.inputs.include_webui }}
+        path: $GITHUB_WORKSPACE/openwrt/bin/targets/**
