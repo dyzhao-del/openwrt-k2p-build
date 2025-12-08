@@ -1,0 +1,111 @@
+name: Build Official Style
+
+on:
+  workflow_dispatch:
+    inputs:
+      openwrt_version:
+        description: 'OpenWRT version'
+        required: true
+        default: 'v24.10.4'
+        type: string
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+    
+    - name: Setup
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential libncurses5-dev git
+    
+    - name: Clone exact version
+      run: |
+        cd $GITHUB_WORKSPACE
+        VERSION="${{ github.event.inputs.openwrt_version }}"
+        echo "Cloning OpenWRT $VERSION..."
+        git clone https://github.com/openwrt/openwrt.git -b $VERSION --depth=1
+        cd openwrt
+        echo "Current commit: $(git log -1 --oneline)"
+    
+    - name: Create official-like config
+      run: |
+        cd $GITHUB_WORKSPACE/openwrt
+        
+        echo "创建类似官方的配置..."
+        
+        # 方法1：使用官方的defconfig（如果存在）
+        if make help | grep -q "defconfig.*k2p"; then
+          echo "使用官方defconfig"
+          make phicomm_k2p_defconfig || make defconfig
+        else
+          # 方法2：创建最小配置，让系统自动选择
+          echo "CONFIG_TARGET_ramips=y" > .config
+          echo "CONFIG_TARGET_ramips_mt7621=y" >> .config
+          echo "CONFIG_TARGET_ramips_mt7621_DEVICE_phicomm_k2p=y" >> .config
+          echo "CONFIG_TARGET_ROOTFS_SQUASHFS=y" >> .config
+          echo "CONFIG_TARGET_ROOTFS_PARTSIZE=16" >> .config
+          
+          # 让系统选择默认包
+          echo "CONFIG_ALL=y" >> .config
+          echo "CONFIG_ALL_KMODS=y" >> .config
+          echo "CONFIG_ALL_NONSHARED=y" >> .config
+        fi
+        
+        # 关键：运行defconfig让系统填充默认值
+        echo "运行defconfig..."
+        make defconfig
+        
+        # 显示关键配置
+        echo "检查配置..."
+        grep -E "(TARGET|DEVICE|ROOTFS)" .config
+    
+    - name: Build minimal
+      run: |
+        cd $GITHUB_WORKSPACE/openwrt
+        
+        echo "准备编译环境..."
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+        
+        echo "下载包..."
+        make download -j2 || true
+        
+        echo "开始编译..."
+        # 使用详细输出
+        make -j2 V=s 2>&1 | tee build.log
+        
+        echo "编译完成，查找固件..."
+    
+    - name: Verify output
+      run: |
+        cd $GITHUB_WORKSPACE/openwrt
+        
+        echo "查找固件: openwrt-*-phicomm_k2p-*.bin"
+        
+        # 按照官方命名格式查找
+        EXPECTED_NAME="openwrt-*-ramips-mt7621-phicomm_k2p-squashfs-sysupgrade.bin"
+        
+        if find . -name "$EXPECTED_NAME" -type f | grep -q .; then
+          echo "✅ 找到官方格式固件！"
+          find . -name "$EXPECTED_NAME" -type f -exec echo "  {} ($(du -h {} | cut -f1))" \;
+        else
+          echo "搜索所有可能的固件..."
+          find . -name "*.bin" -type f | head -20
+          
+          echo "检查目标目录结构..."
+          find bin -type d 2>/dev/null | head -20 || echo "无bin目录"
+        fi
+    
+    - name: Upload results
+      uses: actions/upload-artifact@v4
+      with:
+        name: official-build-${{ github.event.inputs.openwrt_version }}
+        path: |
+          ${{ github.workspace }}/openwrt/bin/**
+          ${{ github.workspace }}/openwrt/.config
+          ${{ github.workspace }}/openwrt/build.log
