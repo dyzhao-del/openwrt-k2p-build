@@ -39,11 +39,9 @@ jobs:
       run: |
         cd $GITHUB_WORKSPACE
         VERSION="${{ github.event.inputs.openwrt_version }}"
-        echo "🚀 Cloning OpenWRT $VERSION..."
+        echo "Cloning OpenWRT $VERSION..."
         
-        # 清理之前的构建
         rm -rf openwrt 2>/dev/null || true
-        
         git clone https://github.com/openwrt/openwrt.git -b $VERSION
         cd openwrt
         echo "Commit: $(git log -1 --oneline)"
@@ -52,10 +50,9 @@ jobs:
       run: |
         cd $GITHUB_WORKSPACE/openwrt
         
-        echo "🔧 Configuring for K2P..."
+        echo "Configuring for K2P..."
         echo "Using config type: ${{ github.event.inputs.config_type }}"
         
-        # 选择配置文件
         CONFIG_FILE=""
         if [[ "${{ github.event.inputs.config_type }}" == "minimal" ]]; then
           CONFIG_FILE="../configs/k2p-minimal.config"
@@ -67,8 +64,7 @@ jobs:
           echo "Using config file: $CONFIG_FILE"
           cp "$CONFIG_FILE" .config
         else
-          echo "⚠️ Config file not found, using minimal defaults"
-          # 基础配置
+          echo "Config file not found, using minimal defaults"
           echo "CONFIG_TARGET_ramips=y" > .config
           echo "CONFIG_TARGET_ramips_mt7621=y" >> .config
           echo "CONFIG_TARGET_ramips_mt7621_DEVICE_phicomm_k2p=y" >> .config
@@ -79,75 +75,33 @@ jobs:
           echo "CONFIG_PACKAGE_kmod-mt7615e=y" >> .config
         fi
         
-        # 运行defconfig填充其他配置
-        echo "Running defconfig..."
         make defconfig
         
-        # 显示配置摘要
-        echo "📋 Configuration summary:"
-        echo "========================================"
-        grep -E "^CONFIG_TARGET|^CONFIG_PACKAGE" .config | sort | head -30
-        echo "========================================"
-        
-        # 检查关键配置
-        echo "🔍 Checking critical configs..."
-        REQUIRED_CONFIGS=(
-          "CONFIG_TARGET_ramips=y"
-          "CONFIG_TARGET_ramips_mt7621=y"
-          "CONFIG_TARGET_ramips_mt7621_DEVICE_phicomm_k2p=y"
-        )
-        
-        for config in "${REQUIRED_CONFIGS[@]}"; do
-          if grep -q "^$config$" .config; then
-            echo "✅ $(echo $config | cut -d'=' -f1)"
-          else
-            echo "❌ MISSING: $(echo $config | cut -d'=' -f1)"
-          fi
-        done
+        echo "Configuration summary:"
+        grep -E "^CONFIG_TARGET|^CONFIG_PACKAGE" .config | sort | head -20
     
     - name: Update feeds
       run: |
         cd $GITHUB_WORKSPACE/openwrt
-        
-        echo "📦 Updating feeds..."
+        echo "Updating feeds..."
         ./scripts/feeds update -a
         ./scripts/feeds install -a
-        
-        echo "✅ Feeds updated"
+        echo "Feeds updated"
     
     - name: Download packages
       run: |
         cd $GITHUB_WORKSPACE/openwrt
-        
-        echo "⬇️ Downloading packages..."
-        
-        # 确保dl目录存在
+        echo "Downloading packages..."
         mkdir -p dl
-        
-        # 尝试并行下载，如果失败则使用单线程
-        echo "Attempting parallel download..."
-        make download -j$(nproc) || {
-          echo "Parallel download failed, trying single-threaded..."
-          make download
-        }
-        
-        # 检查下载结果
-        if [ -f "tmp/.package-download-errors" ]; then
-          echo "⚠️ Some packages failed to download:"
-          cat tmp/.package-download-errors
-          echo "Will attempt to build anyway..."
-        else
-          echo "✅ Package download completed"
-        fi
+        make download -j$(nproc) || make download
+        echo "Download completed"
     
     - name: Build firmware
       run: |
         cd $GITHUB_WORKSPACE/openwrt
-        
-        echo "🔨 Starting firmware build..."
+        echo "Starting firmware build..."
         START_TIME=$(date +%s)
         
-        # 设置并行编译任务数
         CPU_CORES=$(nproc)
         if [ $CPU_CORES -gt 4 ]; then
           JOBS=$((CPU_CORES - 2))
@@ -158,9 +112,7 @@ jobs:
         fi
         
         echo "Using $JOBS parallel jobs"
-        echo "Build log: build.log"
         
-        # 开始编译
         set +e
         make -j$JOBS V=s 2>&1 | tee build.log
         BUILD_STATUS=$?
@@ -168,73 +120,55 @@ jobs:
         
         END_TIME=$(date +%s)
         DURATION=$((END_TIME - START_TIME))
-        echo "⏱️ Build duration: $((DURATION / 60)) minutes $((DURATION % 60)) seconds"
+        echo "Build duration: $((DURATION / 60)) minutes $((DURATION % 60)) seconds"
         
         if [ $BUILD_STATUS -eq 0 ]; then
-          echo "✅ Build successful!"
+          echo "Build successful!"
         else
-          echo "❌ Build failed"
-          
-          # 显示最后50行日志中的错误
-          echo "Last 50 lines with errors:"
-          tail -100 build.log | grep -i "error\|failed\|missing" | tail -20 || echo "No error patterns found"
-          
-          # 检查常见问题
-          echo "Checking for common issues..."
-          if grep -q "recipe for target" build.log; then
-            echo "Found compilation errors"
-          fi
-          
+          echo "Build failed"
+          tail -50 build.log
           exit 1
         fi
     
-    - name: Find and verify firmware
+    - name: Find firmware
       run: |
         cd $GITHUB_WORKSPACE/openwrt
+        echo "Looking for firmware files..."
         
-        echo "🔍 Looking for firmware files..."
-        
-        # 检查目标目录
         TARGET_DIR="bin/targets/ramips/mt7621"
         if [ -d "$TARGET_DIR" ]; then
-          echo "📁 Target directory found: $TARGET_DIR"
-          echo "Contents:"
+          echo "Found target directory"
           ls -la "$TARGET_DIR/"
           
           # 查找固件文件
-          FIRMWARE_FILES=$(find "$TARGET_DIR" -name "*.bin" -type f)
-          if [ -n "$FIRMWARE_FILES" ]; then
-            echo "🎯 Found firmware files:"
-            for file in $FIRMWARE_FILES; do
+          for file in "$TARGET_DIR"/*.bin; do
+            if [ -f "$file" ]; then
               SIZE=$(du -h "$file" | cut -f1)
-              echo "  - $(basename "$file") ($SIZE)"
-            done
-            
-            # 特别查找sysupgrade固件
-            SYS_FILE=$(find "$TARGET_DIR" -name "*sysupgrade*.bin" -type f | head -1)
-            if [ -n "$SYS_FILE" ] && [ -f "$SYS_FILE" ]; then
-              echo "✅ Found sysupgrade firmware: $(basename "$SYS_FILE")"
-              echo "   Size: $(du -h "$SYS_FILE" | cut -f1)"
-              echo "   MD5: $(md5sum "$SYS_FILE" | cut -d' ' -f1)"
-              
-              # 创建固件信息
-              cat > firmware-info.txt << 'INFO'
-# Firmware Information
-Filename: $(basename "$SYS_FILE")
-Size: $(du -h "$SYS_FILE" | cut -f1)
-MD5: $(md5sum "$SYS_FILE" | cut -d' ' -f1)
-Build Time: $(date)
-OpenWRT Version: ${{ github.event.inputs.openwrt_version }}
-Config Type: ${{ github.event.inputs.config_type }}
-INFO
+              echo "Firmware: $(basename "$file") ($SIZE)"
             fi
-          else
-            echo "❌ No .bin files found in target directory"
-          fi
+          done
         else
-          echo "❌ Target directory not found: $TARGET_DIR"
-          echo "Searching for bin files elsewhere..."
-          find . -name "*.bin" -type f | head -10
+          echo "Target directory not found"
+          find . -name "*.bin" -type f 2>/dev/null | head -5
+        fi
+    
+    - name: Create firmware info
+      run: |
+        cd $GITHUB_WORKSPACE/openwrt
+        echo "Creating firmware info..."
+        
+        # 避免使用heredoc
+        echo "# Firmware Information" > firmware-info.txt
+        echo "OpenWRT Version: ${{ github.event.inputs.openwrt_version }}" >> firmware-info.txt
+        echo "Config Type: ${{ github.event.inputs.config_type }}" >> firmware-info.txt
+        echo "Build Time: $(date)" >> firmware-info.txt
+        
+        # 添加固件信息
+        SYS_FILE=$(find bin/targets/ramips/mt7621 -name "*sysupgrade*.bin" -type f 2>/dev/null | head -1)
+        if [ -n "$SYS_FILE" ]; then
+          echo "Firmware File: $(basename "$SYS_FILE")" >> firmware-info.txt
+          echo "Firmware Size: $(du -h "$SYS_FILE" | cut -f1)" >> firmware-info.txt
+          echo "Firmware MD5: $(md5sum "$SYS_FILE" | cut -d' ' -f1)" >> firmware-info.txt
         fi
     
     - name: Upload artifacts
@@ -249,29 +183,11 @@ INFO
           ${{ github.workspace }}/openwrt/firmware-info.txt
         retention-days: 7
     
-    - name: Create build summary
+    - name: Create summary
       if: always()
       run: |
         echo "## Build Summary" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "**OpenWRT Version:** ${{ github.event.inputs.openwrt_version }}" >> $GITHUB_STEP_SUMMARY
-        echo "**Config Type:** ${{ github.event.inputs.config_type }}" >> $GITHUB_STEP_SUMMARY
-        echo "**Build Status:** ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        
-        if [ "${{ job.status }}" == "success" ]; then
-          echo "✅ **Build Successful**" >> $GITHUB_STEP_SUMMARY
-          
-          # 如果有固件信息，显示
-          if [ -f "${{ github.workspace }}/openwrt/firmware-info.txt" ]; then
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "### Firmware Information" >> $GITHUB_STEP_SUMMARY
-            echo '```' >> $GITHUB_STEP_SUMMARY
-            cat "${{ github.workspace }}/openwrt/firmware-info.txt" >> $GITHUB_STEP_SUMMARY
-            echo '```' >> $GITHUB_STEP_SUMMARY
-          fi
-        else
-          echo "❌ **Build Failed**" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Check the build log for details." >> $GITHUB_STEP_SUMMARY
-        fi
+        echo "**Status:** ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
+        echo "**Version:** ${{ github.event.inputs.openwrt_version }}" >> $GITHUB_STEP_SUMMARY
+        echo "**Config:** ${{ github.event.inputs.config_type }}" >> $GITHUB_STEP_SUMMARY
