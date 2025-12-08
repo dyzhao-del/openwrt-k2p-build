@@ -9,9 +9,9 @@ on:
         default: 'simple'
         type: choice
         options:
-        - 'minimal'
-        - 'simple'
-        - 'extended'
+          - 'minimal'
+          - 'simple'
+          - 'extended'
 
 jobs:
   debug-build:
@@ -19,54 +19,54 @@ jobs:
     timeout-minutes: 60
     
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-    
-    - name: Setup environment
-      run: |
-        echo "Setting up build environment..."
-        sudo apt-get update
-        sudo apt-get install -y build-essential ccache ecj fastjar file g++ gawk \
-          gettext git java-propose-classpath libelf-dev libncurses5-dev libncursesw5-dev \
-          libssl-dev python3 python3-distutils python3-setuptools python3-pip \
-          rsync subversion swig time unzip wget xsltproc zlib1g-dev \
-          python3-pyelftools cmake python3-dev p7zip-full jq lzma cpio
-        echo "Environment setup complete"
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Setup environment
+        run: |
+          echo "Setting up build environment..."
+          sudo apt-get update
+          sudo apt-get install -y build-essential ccache ecj fastjar file g++ gawk \
+            gettext git java-propose-classpath libelf-dev libncurses5-dev libncursesw5-dev \
+            libssl-dev python3 python3-distutils python3-setuptools python3-pip \
+            rsync subversion swig time unzip wget xsltproc zlib1g-dev \
+            python3-pyelftools cmake python3-dev p7zip-full jq lzma cpio
+          echo "Environment setup complete"
         
-    - name: Clone OpenWRT
-      run: |
-        echo "Cloning OpenWRT source..."
-        cd $GITHUB_WORKSPACE
-        git clone https://github.com/openwrt/openwrt.git --depth=1
-        cd openwrt
-        echo "OpenWRT cloned to: $(pwd)"
-        echo "Current commit: $(git log -1 --oneline)"
+      - name: Clone OpenWRT
+        run: |
+          echo "Cloning OpenWRT source..."
+          cd $GITHUB_WORKSPACE
+          git clone https://github.com/openwrt/openwrt.git --depth=1
+          cd openwrt
+          echo "OpenWRT cloned to: $(pwd)"
+          echo "Current commit: $(git log -1 --oneline)"
         
-    - name: Test basic OpenWRT
-      run: |
-        cd $GITHUB_WORKSPACE/openwrt
-        echo "Testing basic OpenWRT commands..."
+      - name: Test basic OpenWRT
+        run: |
+          cd $GITHUB_WORKSPACE/openwrt
+          echo "Testing basic OpenWRT commands..."
+          
+          # Test if OpenWRT scripts work
+          echo "1. Testing feeds script..."
+          ./scripts/feeds update -a
+          echo "Feeds update completed"
+          
+          echo "2. Installing feeds..."
+          ./scripts/feeds install -a
+          echo "Feeds install completed"
+          
+          echo "3. Checking architecture support..."
+          make info | grep -A5 "ramips" || true
         
-        # Test if OpenWRT scripts work
-        echo "1. Testing feeds script..."
-        ./scripts/feeds update -a
-        echo "Feeds update completed"
-        
-        echo "2. Installing feeds..."
-        ./scripts/feeds install -a
-        echo "Feeds install completed"
-        
-        echo "3. Checking architecture support..."
-        make info | grep -A5 "ramips"
-        
-    - name: Apply minimal test config
-      run: |
-        cd $GITHUB_WORKSPACE/openwrt
-        
-        echo "Creating minimal test configuration..."
-        
-        # Create a very basic config
-        cat > .config << 'CONFIG_EOF'
+      - name: Apply minimal test config
+        run: |
+          cd $GITHUB_WORKSPACE/openwrt
+          
+          echo "Creating minimal test configuration..."
+          
+          # Create a very basic config
+          cat > .config << 'CONFIG_EOF'
 CONFIG_TARGET_ramips=y
 CONFIG_TARGET_ramips_mt7621=y
 CONFIG_TARGET_ramips_mt7621_DEVICE_phicomm_k2p=y
@@ -80,40 +80,40 @@ CONFIG_PACKAGE_opkg=y
 CONFIG_PACKAGE_procd=y
 CONFIG_PACKAGE_netifd=y
 CONFIG_EOF
+          
+          echo "Configuration created"
+          echo "First 20 lines of .config:"
+          head -20 .config
+          
+          echo "Running defconfig..."
+          make defconfig || echo "defconfig failed"
         
-        echo "Configuration created"
-        echo "First 20 lines of .config:"
-        head -20 .config
+      - name: Test download
+        run: |
+          cd $GITHUB_WORKSPACE/openwrt
+          echo "Testing package download..."
+          
+          # Try to download with timeout
+          timeout 300 make download -j1 || echo "Download timeout or error"
+          
+          echo "Download directory contents:"
+          ls -la dl/ 2>/dev/null | head -10 || echo "No dl directory"
         
-        echo "Running defconfig..."
-        make defconfig
+      - name: Quick test build
+        run: |
+          cd $GITHUB_WORKSPACE/openwrt
+          echo "Starting quick test build..."
+          
+          # Only build kernel to test
+          echo "Building kernel..."
+          make target/linux/{clean,prepare} V=s 2>&1 | tail -50 || echo "Build test failed"
+          
+          echo "Build test completed"
         
-    - name: Test download
-      run: |
-        cd $GITHUB_WORKSPACE/openwrt
-        echo "Testing package download..."
-        
-        # Try to download with timeout
-        timeout 300 make download -j1 || echo "Download timeout or error"
-        
-        echo "Download directory contents:"
-        ls -la dl/ 2>/dev/null | head -10 || echo "No dl directory"
-        
-    - name: Quick test build
-      run: |
-        cd $GITHUB_WORKSPACE/openwrt
-        echo "Starting quick test build..."
-        
-        # Only build kernel to test
-        echo "Building kernel..."
-        make target/linux/{clean,prepare} V=s 2>&1 | tail -50
-        
-        echo "Build test completed"
-        
-    - name: Check build directory
-      run: |
-        echo "Checking build directory structure..."
-        find $GITHUB_WORKSPACE/openwrt -type d -name "*ramips*" | head -10
-        echo ""
-        echo "bin directory:"
-        ls -la $GITHUB_WORKSPACE/openwrt/bin/ 2>/dev/null || echo "No bin directory"
+      - name: Check build directory
+        run: |
+          echo "Checking build directory structure..."
+          find $GITHUB_WORKSPACE/openwrt -type d -name "*ramips*" 2>/dev/null | head -10 || true
+          echo ""
+          echo "bin directory:"
+          ls -la $GITHUB_WORKSPACE/openwrt/bin/ 2>/dev/null || echo "No bin directory"

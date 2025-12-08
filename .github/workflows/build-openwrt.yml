@@ -9,9 +9,8 @@ on:
         default: 'k2p-working-minimal.config'
         type: choice
         options:
-        - 'k2p-working-minimal.config'
-        - 'k2p-minimal.config'
-        - 'k2p-stage2-extended.config'
+          - 'k2p-working-minimal.config'
+          - 'k2p-test-tiny.config'
 
 jobs:
   build:
@@ -19,152 +18,87 @@ jobs:
     timeout-minutes: 120
     
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
       
-    - name: Install dependencies
-      run: |
-        sudo apt-get update
-        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-          build-essential ccache ecj fastjar file g++ gawk \
-          gettext git java-propose-classpath libelf-dev \
-          libncurses5-dev libncursesw5-dev libssl-dev python3 \
-          python3-distutils python3-setuptools python3-pip \
-          rsync subversion swig time unzip wget xsltproc \
-          zlib1g-dev python3-pyelftools cmake python3-dev \
-          p7zip-full jq lzma cpio
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential ccache ecj fastjar file g++ gawk \
+            gettext git libelf-dev libncurses5-dev libncursesw5-dev \
+            libssl-dev python3 python3-distutils python3-setuptools \
+            rsync subversion swig time unzip wget xsltproc zlib1g-dev
+            
+      - name: Clone OpenWRT
+        run: |
+          cd $GITHUB_WORKSPACE
+          git clone https://github.com/openwrt/openwrt.git --depth=1
           
-    - name: Clone OpenWRT
-      run: |
-        cd /tmp
-        git clone https://github.com/openwrt/openwrt.git --depth=1
-        mv openwrt $GITHUB_WORKSPACE/
-        
-    - name: Apply configuration
-      run: |
-        cd $GITHUB_WORKSPACE/openwrt
-        
-        CONFIG_FILE="${{ github.event.inputs.config_file }}"
-        echo "Using config file: $CONFIG_FILE"
-        
-        if [ -f "$GITHUB_WORKSPACE/configs/$CONFIG_FILE" ]; then
-          echo "Copying config file..."
-          cp "$GITHUB_WORKSPACE/configs/$CONFIG_FILE" .config
+      - name: Apply configuration
+        run: |
+          cd $GITHUB_WORKSPACE/openwrt
           
-          echo "Running defconfig..."
-          make defconfig
+          CONFIG_FILE="${{ github.event.inputs.config_file }}"
+          echo "Using config file: $CONFIG_FILE"
           
-          echo "Configuration summary:"
-          echo "======================"
-          grep "^CONFIG_TARGET" .config
-          echo ""
-          echo "Enabled packages: $(grep "^CONFIG_PACKAGE.*=y$" .config | wc -l)"
-        else
-          echo "ERROR: Config file not found: $CONFIG_FILE"
-          ls -la "$GITHUB_WORKSPACE/configs/"
+          if [ -f "$GITHUB_WORKSPACE/configs/$CONFIG_FILE" ]; then
+            echo "Copying config file..."
+            cp "$GITHUB_WORKSPACE/configs/$CONFIG_FILE" .config
+            
+            echo "Running defconfig..."
+            make defconfig
+          else
+            echo "ERROR: Config file not found"
+            exit 1
+          fi
+          
+      - name: Update feeds
+        run: |
+          cd $GITHUB_WORKSPACE/openwrt
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          
+      - name: Download packages
+        run: |
+          cd $GITHUB_WORKSPACE/openwrt
+          make download -j1 || true
+          
+      - name: Build firmware
+        run: |
+          cd $GITHUB_WORKSPACE/openwrt
+          
+          echo "Starting build..."
+          make -j2 V=s 2>&1 | tee build.log
+          
+      - name: Check results
+        run: |
+          cd $GITHUB_WORKSPACE/openwrt
+          
+          echo "Looking for firmware..."
+          
+          # Check multiple possible locations
+          for dir in "bin/targets/ramips/mt7621" "bin/ramips" "."; do
+            if find "$dir" -name "*k2p*.bin" 2>/dev/null | grep -q .; then
+              echo "Found firmware in $dir"
+              find "$dir" -name "*.bin" -exec echo "  {}" \;
+              exit 0
+            fi
+          done
+          
+          echo "No firmware found"
+          echo "Available files in bin/:"
+          find bin -type f 2>/dev/null | head -20 || true
           exit 1
-        fi
-        
-    - name: Update feeds
-      run: |
-        cd $GITHUB_WORKSPACE/openwrt
-        echo "Updating feeds..."
-        ./scripts/feeds update -a
-        ./scripts/feeds install -a
-        
-    - name: Download packages
-      run: |
-        cd $GITHUB_WORKSPACE/openwrt
-        echo "Downloading packages..."
-        
-        # Try multiple times if needed
-        for i in 1 2 3; do
-          echo "Attempt $i..."
-          if make download -j1; then
-            echo "Download successful"
-            break
-          else
-            echo "Download failed, retrying..."
-            sleep 10
-          fi
-        done
-        
-    - name: Build firmware
-      run: |
-        cd $GITHUB_WORKSPACE/openwrt
-        
-        echo "Starting build process..."
-        echo "Build started at: $(date)"
-        
-        # Build with verbose output
-        if make -j2 V=sc 2>&1 | tee build.log; then
-          echo "Build completed successfully"
-          echo "BUILD_STATUS=success" >> $GITHUB_ENV
-        else
-          echo "Build failed"
-          echo "BUILD_STATUS=failed" >> $GITHUB_ENV
-        fi
-        
-        echo "Build finished at: $(date)"
-        
-    - name: Check results
-      if: env.BUILD_STATUS == 'success'
-      run: |
-        cd $GITHUB_WORKSPACE/openwrt
-        
-        echo "Checking for firmware files..."
-        
-        # Look for firmware in expected locations
-        FIRMWARE_PATH=""
-        
-        # Try multiple possible locations
-        for path in "bin/targets/ramips/mt7621" "bin/ramips"; do
-          if [ -d "$path" ]; then
-            echo "Found directory: $path"
-            FIRMWARE_PATH="$path"
-            break
-          fi
-        done
-        
-        if [ -n "$FIRMWARE_PATH" ]; then
-          echo "Listing files in $FIRMWARE_PATH:"
-          find "$FIRMWARE_PATH" -type f -name "*.bin" | head -20
           
-          # Check for K2P firmware
-          K2P_FIRMWARE=$(find "$FIRMWARE_PATH" -type f -name "*phicomm_k2p*.bin" | head -1)
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: $GITHUB_WORKSPACE/openwrt/bin/**
           
-          if [ -n "$K2P_FIRMWARE" ]; then
-            echo "Found K2P firmware: $K2P_FIRMWARE"
-            echo "File size: $(du -h "$K2P_FIRMWARE" | cut -f1)"
-            echo "FIRMWARE_FILE=$K2P_FIRMWARE" >> $GITHUB_ENV
-          else
-            echo "No K2P firmware found, listing all .bin files:"
-            find "$FIRMWARE_PATH" -type f -name "*.bin" | while read f; do
-              echo "  $f ($(du -h "$f" | cut -f1))"
-            done
-          fi
-        else
-          echo "No output directory found"
-          echo "Available directories in bin/:"
-          find bin -type d 2>/dev/null || echo "No bin directory"
-        fi
-        
-    - name: Upload artifacts
-      if: env.BUILD_STATUS == 'success'
-      uses: actions/upload-artifact@v4
-      with:
-        name: firmware
-        path: |
-          ${{ github.workspace }}/openwrt/bin/targets/ramips/mt7621/*
-          ${{ github.workspace }}/openwrt/.config
-        retention-days: 7
-        
-    - name: Upload logs
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: logs
-        path: |
-          ${{ github.workspace }}/openwrt/build.log
-          ${{ github.workspace }}/openwrt/config.log
-        retention-days: 7
+      - name: Upload logs
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs
+          path: $GITHUB_WORKSPACE/openwrt/build.log
