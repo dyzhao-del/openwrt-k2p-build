@@ -40,41 +40,45 @@ jobs:
       run: |
         cd $GITHUB_WORKSPACE/openwrt
         
-        echo "🔧 应用修复后的配置..."
+        echo "Applying fixed configuration..."
         
-        # 使用绝对能成功的配置
-        cat > .config << 'CONFIG_EOF'
-CONFIG_TARGET_ramips=y
-CONFIG_TARGET_ramips_mt7621=y
-CONFIG_TARGET_ramips_mt7621_DEVICE_phicomm_k2p=y
-CONFIG_TARGET_ROOTFS_SQUASHFS=y
-CONFIG_TARGET_ROOTFS_PARTSIZE=16
-CONFIG_TARGET_IMAGES_GZIP=y
-CONFIG_PACKAGE_kmod-mt7615e=y
-CONFIG_PACKAGE_kmod-mt7615-firmware=y
-CONFIG_PACKAGE_wpad-openssl=y
-CONFIG_PACKAGE_dnsmasq-full=y  # 关键修复：只使用full版本
-CONFIG_PACKAGE_firewall=y
-CONFIG_PACKAGE_odhcpd-ipv6only=y
-CONFIG_PACKAGE_luci=y
-CONFIG_PACKAGE_luci-i18n-base-zh-cn=y
-CONFIG_PACKAGE_luci-app-firewall=y
-CONFIG_PACKAGE_luci-app-opkg=y
-CONFIG_EOF
+        # 使用echo命令避免heredoc的YAML解析问题
+        echo "CONFIG_TARGET_ramips=y" > .config
+        echo "CONFIG_TARGET_ramips_mt7621=y" >> .config
+        echo "CONFIG_TARGET_ramips_mt7621_DEVICE_phicomm_k2p=y" >> .config
+        echo "CONFIG_TARGET_ROOTFS_SQUASHFS=y" >> .config
+        echo "CONFIG_TARGET_ROOTFS_PARTSIZE=16" >> .config
+        echo "CONFIG_TARGET_IMAGES_GZIP=y" >> .config
+        echo "CONFIG_PACKAGE_kmod-mt7615e=y" >> .config
+        echo "CONFIG_PACKAGE_kmod-mt7615-firmware=y" >> .config
+        echo "CONFIG_PACKAGE_wpad-openssl=y" >> .config
+        echo "CONFIG_PACKAGE_dnsmasq-full=y" >> .config
+        echo "CONFIG_PACKAGE_firewall=y" >> .config
+        echo "CONFIG_PACKAGE_odhcpd-ipv6only=y" >> .config
+        echo "CONFIG_PACKAGE_luci=y" >> .config
+        echo "CONFIG_PACKAGE_luci-i18n-base-zh-cn=y" >> .config
+        echo "CONFIG_PACKAGE_luci-app-firewall=y" >> .config
+        echo "CONFIG_PACKAGE_luci-app-opkg=y" >> .config
         
         make defconfig
         
-        echo "✅ 配置验证:"
-        echo "dnsmasq配置:"
-        grep "dnsmasq" .config
+        echo "Configuration validation:"
+        echo "========================="
+        echo "Target device:"
+        grep "CONFIG_TARGET.*DEVICE.*k2p" .config || echo "⚠️ K2P device not found!"
+        
         echo ""
-        echo "总包数: $(grep -c '^CONFIG_PACKAGE' .config)"
+        echo "DNS server:"
+        grep "CONFIG_PACKAGE_dnsmasq" .config || echo "⚠️ No DNS server configured!"
+        
+        echo ""
+        echo "Total packages: $(grep -c '^CONFIG_PACKAGE' .config)"
     
     - name: Build with fixed config
       run: |
         cd $GITHUB_WORKSPACE/openwrt
         
-        echo "🔨 开始构建..."
+        echo "Starting firmware build..."
         
         # 更新feeds
         ./scripts/feeds update -a
@@ -88,21 +92,21 @@ CONFIG_EOF
         
         # 检查结果
         if [ $? -eq 0 ]; then
-          echo "✅ 构建成功!"
+          echo "✅ Build successful!"
           
           # 检查固件文件
           if [ -f "bin/targets/ramips/mt7621/openwrt-ramips-mt7621-phicomm_k2p-squashfs-sysupgrade.bin" ]; then
             FIRMWARE="bin/targets/ramips/mt7621/openwrt-ramips-mt7621-phicomm_k2p-squashfs-sysupgrade.bin"
-            echo "🎯 固件生成成功!"
-            echo "文件: $(basename $FIRMWARE)"
-            echo "大小: $(du -h $FIRMWARE | cut -f1)"
+            echo "🎯 Firmware generated successfully!"
+            echo "File: $(basename $FIRMWARE)"
+            echo "Size: $(du -h $FIRMWARE | cut -f1)"
           else
-            echo "⚠️ 构建成功但未找到固件文件"
+            echo "⚠️ Build completed but firmware not found"
             find bin -name "*.bin" -type f 2>/dev/null | head -5
           fi
         else
-          echo "❌ 构建失败"
-          echo "最后错误:"
+          echo "❌ Build failed"
+          echo "Last errors:"
           tail -50 build.log | grep -i "error\|fail"
           exit 1
         fi
@@ -120,10 +124,10 @@ CONFIG_EOF
     - name: Create success summary
       if: success()
       run: |
-        echo "## ✅ 构建修复成功!" >> $GITHUB_STEP_SUMMARY
+        echo "## ✅ Fix Build Successful!" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "**问题已修复:** dnsmasq 和 dnsmasq-full 包冲突" >> $GITHUB_STEP_SUMMARY
+        echo "**Problem Fixed:** dnsmasq package conflict resolved" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "**解决方案:** 只使用 dnsmasq-full 包" >> $GITHUB_STEP_SUMMARY
+        echo "**Solution:** Using dnsmasq-full package only" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "固件已生成，请在Artifacts中下载。" >> $GITHUB_STEP_SUMMARY
+        echo "Firmware is available in the artifacts." >> $GITHUB_STEP_SUMMARY
